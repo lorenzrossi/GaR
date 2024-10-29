@@ -45,49 +45,49 @@ def download_eurostat_industrial_production(base_url, filters):
     # Debug: print the keys in the response
     print("Response keys:", data.keys())
 
-    ### Normalize the JSON structure into a pandas DataFrame for analysis
-    #series_data = data['dataSets'][0]['series']
-    #dimensions = data['structure']['dimensions']['series']
+    ## Normalize the JSON structure into a pandas DataFrame for analysis
+    series_data = data['dataSets'][0]['series']
+    dimensions = data['structure']['dimensions']['series']
 ##
-    ### Extract the time periods
-    #time_periods = [dimension['id'] for dimension in data['structure']['dimensions']['observation'][0]['values']]
+    ## Extract the time periods
+    time_periods = [dimension['id'] for dimension in data['structure']['dimensions']['observation'][0]['values']]
 ##
-    ## Create DataFrame to store the extracted data
-    #rows = []
-    #for series_key, series_value in data.items():
-    #    obs = series_value['observations']
-    #    # Split the series key to map dimensions (e.g., geo, unit, s_adj)
-    #    keys = series_key.split(':')
-    #    for obs_key, obs_value in obs.items():
-    #        time_index = int(obs_key)
-    #        time_period = time_periods[time_index]
-    #        rows.append({
-    #            'geo': keys[0],
-    #            'unit': keys[1],
-    #            's_adj': keys[2],
-    #            'nace_r2': keys[3],
-    #            'time': time_period,
-    #            'value': obs_value[0]
-    #        })
+    # Create DataFrame to store the extracted data
+    rows = []
+    for series_key, series_value in data.items():
+        obs = series_value['observations']
+        # Split the series key to map dimensions (e.g., geo, unit, s_adj)
+        keys = series_key.split(':')
+        for obs_key, obs_value in obs.items():
+            time_index = int(obs_key)
+            time_period = time_periods[time_index]
+            rows.append({
+                'geo': keys[0],
+                'unit': keys[1],
+                's_adj': keys[2],
+                'nace_r2': keys[3],
+                'time': time_period,
+                'value': obs_value[0]
+            })
 ##
-    ## Create DataFrame from the list of rows
-    #df = pd.DataFrame(rows)
+    # Create DataFrame from the list of rows
+    df = pd.DataFrame(rows)
 ##
-    ## Filter DataFrame for EU27 and seasonally adjusted data
-    #df_filtered = df[(df['geo'] == 'EU27_2020') & (df['s_adj'] == 'SA')]
+    # Filter DataFrame for EU27 and seasonally adjusted data
+    df_filtered = df[(df['geo'] == 'EU27_2020') & (df['s_adj'] == 'SA')]
 #
-    ## Convert the time column to a datetime object for better handling
-    #df_filtered['time'] = pd.to_datetime(df_filtered['time'], format='%Y-%m')
+    # Convert the time column to a datetime object for better handling
+    df_filtered['time'] = pd.to_datetime(df_filtered['time'], format='%Y-%m')
 #
-    ## Sort the DataFrame by time
-    #df_filtered = df_filtered.sort_values(by='time')
+    # Sort the DataFrame by time
+    df_filtered = df_filtered.sort_values(by='time')
 #
-    ## Display the first few rows
-    #print(df_filtered.head())
+    # Display the first few rows
+    print(df_filtered.head())
 #
-    ## Save to a CSV file
-    #df_filtered.to_csv('eu27_industrial_production_2004_2023.csv', index=False)
-    #print("Data saved to eu27_industrial_production_2004_2023.csv")
+    # Save to a CSV file
+    df_filtered.to_csv('eu27_industrial_production_2004_2023.csv', index=False)
+    print("Data saved to eu27_industrial_production_2004_2023.csv")
 
 # Call the function to download and save the data
     return data
