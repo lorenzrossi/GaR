@@ -96,6 +96,18 @@ def download_eurostat_industrial_production(base_url, filters):
 
 raws = download_eurostat_industrial_production(base_url=url, filters=specs)
 
+# Simplified filter settings to check the response structure
+specs2 = {
+    'geo': 'EU27_2020',
+    'unit': 'I15',
+    's_adj': 'SA',
+    'nace_r2': 'B',  # Testing with just 'B' (Mining)
+    'time': '2004'
+}
+
+# Define the URL with the dataset code and format
+url2 = "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/sts_inpr_m?format=json&lang=en"
+
 def inspect_eurostat_response(base_url, filters):
     # Construct the query with filters
     filter_query = '&'.join([f'{key}={value}' for key, value in filters.items()])
