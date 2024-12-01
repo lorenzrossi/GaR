@@ -8,6 +8,7 @@ import seaborn as sns
 import matplotlib.dates as mdates
 import matplotlib as mpl
 from scipy import stats
+from statsmodels.graphics.tsaplots import plot_acf
 
 # Function to plot different types of time-series
 def plot_series(df=None, column=None, series=pd.Series([]),
@@ -47,6 +48,8 @@ def analyze_order(order, results_dict):
         plt.legend()
         plt.grid(True)
         plt.show()
+
+        plot_acf(residuals, lags=30)
         
     else:
         print(f"Order {order} not found in the results dictionary.")
