@@ -94,7 +94,7 @@ def ljung_box_test(order, results_dict, lags=12):
         print(lb_test)
 
         # Interpret results
-        if any(lb_test['p-value'] < 0.05):
+        if any(lb_test['bp-value'] < 0.05):
             print("\nResiduals are autocorrelated at some lag(s) (p-value < 0.05).")
         else:
             print("\nResiduals show no significant autocorrelation (p-value >= 0.05).")
