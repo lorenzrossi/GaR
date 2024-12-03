@@ -82,7 +82,7 @@ def find_best_model(results_dict):
     
 
 # FUNCTION TO APPLY LJUNG-BOX TEST FOR A SPECIFIC ORDER
-def ljung_box_test(order, results_dict, lags=12):
+def ljung_box_test(order, results_dict, lags=24):
     if order in results_dict:
         # Extract residuals
         residuals = results_dict[order]["residuals"]
@@ -91,7 +91,7 @@ def ljung_box_test(order, results_dict, lags=12):
         lb_test = acorr_ljungbox(residuals, lags=lags, return_df=True)
 
         print(f"Ljung-Box Test Results for ARIMA order {order}:\n")
-        print(lb_test)
+        #print(lb_test)
 
         # Interpret results
         if any(lb_test['lb_pvalue'] < 0.05):
