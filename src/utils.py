@@ -10,6 +10,9 @@ import matplotlib as mpl
 from scipy import stats
 from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.vector_ar.vecm import coint_johansen
+from statsmodels.tsa.stattools import coint
+
 
 # Function to plot different types of time-series
 def plot_series(df=None, column=None, series=pd.Series([]),
@@ -103,3 +106,53 @@ def ljung_box_test(order, results_dict, lags=24):
     else:
         print(f"Order {order} not found in the results dictionary.")
         return None
+    
+    # Function to perform Johansen test
+
+def analyze_cointegration(df):
+
+    """
+    Perform Cointegration test using both the Johansen and Engle-Granger test
+
+    Parameters: df (pd.DataFrame): A DataFrame with two time series columns.
+
+    Returns: dict: A dictionary with Johansen rank results, Engle-Granger score, and p-value.
+    
+    """
+     # Johansen Test
+    johansen_result = coint_johansen(df, det_order=0, k_ar_diff=1)
+    trace_stat = johansen_result.lr1  # Trace statistics
+    critical_values = johansen_result.cvt  # Critical values (90%, 95%, 99%)
+
+    #for rank in [0, 1]:
+    #    print(f"Rank {rank}:")
+    #    print(f"Trace Statistic: {trace_stat[rank]:.4f}")
+    #    print(f"Critical Value at 95%: {critical_values[rank][1]:.4f}")  # 95% level
+    #    print()
+
+    # Determine Johansen rank (0 or 1)
+    rank = None
+    if trace_stat[0] < critical_values[0][1]:
+        rank = 0
+    elif trace_stat[1] < critical_values[1][1]:
+        rank = 1
+    else:
+        rank = ">1"
+
+    # Engle-Granger Test
+    score, pvalue, _ = coint(df.iloc[:, 0], df.iloc[:, 1])
+
+    # Prepare Results
+    results = {
+        "Johansen": {
+            "Trace Statistics": trace_stat.tolist(),
+            "Critical Values": critical_values.tolist(),
+            "Rank": rank
+        },
+        "Engle-Granger": {
+            "Score": score,
+            "P-Value": pvalue
+        }
+    }
+
+    return results
