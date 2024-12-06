@@ -120,7 +120,7 @@ def analyze_cointegration(df):
     
     """
      # Johansen Test
-    johansen_result = coint_johansen(df, det_order=0, k_ar_diff=1)
+    johansen_result = coint_johansen(df, det_order=0, k_ar_diff=0)
     trace_stat = johansen_result.lr1  # Trace statistics
     critical_values = johansen_result.cvt  # Critical values (90%, 95%, 99%)
 
