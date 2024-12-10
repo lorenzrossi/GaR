@@ -109,54 +109,50 @@ def ljung_box_test(order, results_dict, lags=24):
     
     # Function to perform Johansen test
 
-def analyze_cointegration(ts1, ts2, k_ar_diff=1, det_order=0):
+def analyze_cointegration(ts1, ts2, max_lags=0):
     """
     Analyze cointegration between two time series with options for Johansen parameters.
     
     Parameters:
     - ts1, ts2: Time series (arrays or pandas Series)
-    - k_ar_diff: Number of lags to include in differencing for Johansen test (default is 1)
-    - det_order: Deterministic trend order for Johansen test (0 for no trend, 1 for linear trend, etc.)
+    - max_lags: Number of lags to include in differencing for Johansen test (default is 0)
     
     Returns:
     - Dictionary with results for Johansen test and Engle-Granger test
     """
-    # Combine the time series into a single array
-    data = np.column_stack((ts1, ts2))
+    results = {}
+
+    # Johansen Test for Cointegration
+    johansen_results = {}
+    det_orders = [0, 1, 2]  # Possible deterministic trend orders
+
+    """ 
+    - det_order: Deterministic trend order for Johansen test (0 for no trend, 1 for linear trend, etc.)
+    """
     
-    # Johansen test
-    johansen_result = coint_johansen(data, det_order, k_ar_diff)
-    trace_stats = johansen_result.lr1  # Trace statistics
-    critical_values = johansen_result.cvt  # Critical values
+    for det_order in det_orders:
+        johansen_test = sm.tsa.coint_johansen(
+            endog=np.column_stack((ts1, ts2)), det_order=det_order, k_ar_diff=max_lags
+        )
+        trace_stats = johansen_test.lr1  # Trace statistics
+        critical_values = johansen_test.cvt  # Critical values (90%, 95%, 99%)
+        johansen_results[f"det_order={det_order}"] = {
+            "trace_stats": trace_stats,
+            "critical_values": critical_values,
+            "cointegration_rank": sum(trace_stats > critical_values[:, 1])  # Compare with 95% level
+        }
     
-    # Engle-Granger test
-    score, pvalue, _ = coint(ts1, ts2)
-    
-    # Results summary
-    results = {
-        "Johansen": {
-            "Trace Statistics": trace_stats,
-            "Critical Values": critical_values,
-            "Cointegration Rank": "0 or 1" if trace_stats[0] > critical_values[0, 1] else "No Cointegration",
-        },
-        "Engle-Granger": {
-            "Score": score,
-            "P-value": pvalue,
-            "Conclusion": "Cointegrated" if pvalue < 0.05 else "Not Cointegrated",
-        },
+    results['Johansen Test'] = johansen_results
+
+    # Engle-Granger Test for Cointegration
+    score, p_value, _ = sm.tsa.coint(ts1, ts2)
+    engle_granger_results = {
+        "score": score,
+        "p_value": p_value,
+        "cointegration": p_value < 0.05  # Null hypothesis: no cointegration
     }
-    
-    # Print the results
-    print("Johansen Test Results:")
-    print(f"Trace Statistics: {trace_stats}")
-    print(f"Critical Values (90%, 95%, 99%):\n{critical_values}")
-    print(f"Cointegration Rank: {results['Johansen']['Cointegration Rank']}")
-    
-    print("\nEngle-Granger Test Results:")
-    print(f"Score: {score}")
-    print(f"P-value: {pvalue}")
-    print(f"Conclusion: {results['Engle-Granger']['Conclusion']}")
-    
+    results['Engle-Granger Test'] = engle_granger_results
+
     return results
 
 # function to perform a simple ols regression and retrieve the results
