@@ -124,7 +124,7 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
 
     # Johansen Test for Cointegration
     johansen_results = {}
-    det_orders = [0, 1, 2]  # Possible deterministic trend orders
+    det_orders = [-1, 0, 1]  # Possible deterministic trend orders
 
     """ 
     - det_order: Deterministic trend order for Johansen test (0 for no trend, 1 for linear trend, etc.)
