@@ -131,7 +131,7 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
     """
     
     for det_order in det_orders:
-        johansen_test = sm.tsa.coint_johansen(
+        johansen_test = coint_johansen(
             endog=np.column_stack((ts1, ts2)), det_order=det_order, k_ar_diff=max_lags
         )
         trace_stats = johansen_test.lr1  # Trace statistics
