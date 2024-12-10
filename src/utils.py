@@ -109,7 +109,7 @@ def ljung_box_test(order, results_dict, lags=24):
     
     # Function to perform Johansen test
 
-def analyze_coint(ts1, ts2, max_lags=0):
+def analyze_cointegration(ts1, ts2, max_lags=0):
     """
     Analyze cointegration between two time series with options for Johansen parameters.
     
