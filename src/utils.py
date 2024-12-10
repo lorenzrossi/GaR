@@ -109,50 +109,67 @@ def ljung_box_test(order, results_dict, lags=24):
     
     # Function to perform Johansen test
 
-def analyze_cointegration(df):
-
+def analyze_cointegration(ts1, ts2, k_ar_diff=1, det_order=0):
     """
-    Perform Cointegration test using both the Johansen and Engle-Granger test
-
-    Parameters: df (pd.DataFrame): A DataFrame with two time series columns.
-
-    Returns: dict: A dictionary with Johansen rank results, Engle-Granger score, and p-value.
+    Analyze cointegration between two time series with options for Johansen parameters.
     
+    Parameters:
+    - ts1, ts2: Time series (arrays or pandas Series)
+    - k_ar_diff: Number of lags to include in differencing for Johansen test (default is 1)
+    - det_order: Deterministic trend order for Johansen test (0 for no trend, 1 for linear trend, etc.)
+    
+    Returns:
+    - Dictionary with results for Johansen test and Engle-Granger test
     """
-     # Johansen Test
-    johansen_result = coint_johansen(df, det_order=0, k_ar_diff=0)
-    trace_stat = johansen_result.lr1  # Trace statistics
-    critical_values = johansen_result.cvt  # Critical values (90%, 95%, 99%)
-
-    #for rank in [0, 1]:
-    #    print(f"Rank {rank}:")
-    #    print(f"Trace Statistic: {trace_stat[rank]:.4f}")
-    #    print(f"Critical Value at 95%: {critical_values[rank][1]:.4f}")  # 95% level
-    #    print()
-
-    # Determine Johansen rank (0 or 1)
-    rank = None
-    if trace_stat[0] < critical_values[0][1]:
-        rank = 0
-    elif trace_stat[1] < critical_values[1][1]:
-        rank = 1
-    else:
-        rank = ">1"
-
-    # Engle-Granger Test
-    score, pvalue, _ = coint(df.iloc[:, 0], df.iloc[:, 1])
-
-    # Prepare Results
+    # Combine the time series into a single array
+    data = np.column_stack((ts1, ts2))
+    
+    # Johansen test
+    johansen_result = coint_johansen(data, det_order, k_ar_diff)
+    trace_stats = johansen_result.lr1  # Trace statistics
+    critical_values = johansen_result.cvt  # Critical values
+    
+    # Engle-Granger test
+    score, pvalue, _ = coint(ts1, ts2)
+    
+    # Results summary
     results = {
         "Johansen": {
-            "Trace Statistics": trace_stat.tolist(),
-            "Critical Values": critical_values.tolist(),
-            "Rank": rank
+            "Trace Statistics": trace_stats,
+            "Critical Values": critical_values,
+            "Cointegration Rank": "0 or 1" if trace_stats[0] > critical_values[0, 1] else "No Cointegration",
         },
         "Engle-Granger": {
             "Score": score,
-            "P-Value": pvalue
-        }
+            "P-value": pvalue,
+            "Conclusion": "Cointegrated" if pvalue < 0.05 else "Not Cointegrated",
+        },
     }
-
+    
+    # Print the results
+    print("Johansen Test Results:")
+    print(f"Trace Statistics: {trace_stats}")
+    print(f"Critical Values (90%, 95%, 99%):\n{critical_values}")
+    print(f"Cointegration Rank: {results['Johansen']['Cointegration Rank']}")
+    
+    print("\nEngle-Granger Test Results:")
+    print(f"Score: {score}")
+    print(f"P-value: {pvalue}")
+    print(f"Conclusion: {results['Engle-Granger']['Conclusion']}")
+    
     return results
+
+# function to perform a simple ols regression and retrieve the results
+def ols_reg(y, x):
+
+    """ 
+    y = your dependent time series (arrays or pandas Series)
+    x = your covariates/independent variables (arrays or pandas Series or Dataframe)
+    """
+
+    Y = y
+    X = x
+    X = sm.add_constant(X)
+    model = sm.OLS(Y,X)
+    ols_results = model.fit()
+    return ols_results
