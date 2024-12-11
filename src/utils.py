@@ -12,6 +12,7 @@ from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.vector_ar.vecm import coint_johansen
 from statsmodels.tsa.stattools import coint
+from scipy.stats import f
 
 
 # Function to plot different types of time-series
@@ -182,3 +183,64 @@ def ols_reg(y, x):
     model = sm.OLS(Y,X)
     ols_results = model.fit()
     return ols_results
+
+# Function to detect structural break in the data by doing the Chow Test
+def sbreak_test(X, Y, last_index, first_index=None, significance=0.05):
+    """
+    Perform a Chow test for a structural break at a specified breakpoint or breakpoint range.
+    
+    Args:
+        X (array-like): The independent variable(s) (explanatory variable(s)).
+        Y (array-like): The dependent variable (response variable).
+        last_index (int): The index of the last data point before the breakpoint.
+        first_index (int, optional): The index of the first data point after the breakpoint (for ranges). Defaults to None.
+        significance (float, optional): The significance level for the test (default: 0.05).
+        
+    Returns:
+        f_stat (float): The F-statistic value.
+        p_value (float): The p-value for the Chow test.
+    """
+    # Ensure X is a 2D array and add a constant for regression
+    X = sm.add_constant(X)
+
+    # Determine the range for splitting the data
+    if first_index is None:
+        first_index = last_index + 1  # Default to single-point break
+
+    # Split the data
+    X1, X2 = X[:last_index], X[first_index:]
+    Y1, Y2 = Y[:last_index], Y[first_index:]
+
+    # Fit separate regressions for the two segments
+    model1 = sm.OLS(Y1, X1).fit()
+    model2 = sm.OLS(Y2, X2).fit()
+
+    # Fit the full model
+    model_full = sm.OLS(Y, X).fit()
+
+    # Compute the residual sum of squares (SSR) for each model
+    SSR_full = model_full.ssr  # Full model
+    SSR1 = model1.ssr  # First segment
+    SSR2 = model2.ssr  # Second segment
+
+    # Calculate the number of parameters (including constant)
+    k = X.shape[1]
+
+    # Sample sizes for each segment
+    n1, n2 = len(Y1), len(Y2)
+
+    # Compute the F-statistic
+    numerator = (SSR_full - (SSR1 + SSR2)) / k
+    denominator = (SSR1 + SSR2) / (n1 + n2 - 2 * k)
+    f_stat = numerator / denominator
+
+    # Calculate the p-value using the F-distribution
+    p_value = 1 - f.cdf(f_stat, dfn=k, dfd=n1 + n2 - 2 * k)
+
+    # Interpret the results based on the significance level
+    if p_value < significance:
+        print(f"Structural break detected at the breakpoint (p-value = {p_value:.4f})")
+    else:
+        print(f"No structural break detected at the breakpoint (p-value = {p_value:.4f})")
+
+    return f_stat, p_value
