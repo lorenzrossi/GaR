@@ -153,6 +153,19 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
     }
     results['Engle-Granger Test'] = engle_granger_results
 
+    for det_order, stats in results['Johansen Test'].items():
+        print(f"\nDeterministic Order: {det_order}")
+        print(f"Trace Statistics: {stats['trace_stats']}")
+        print(f"Critical Values (90%, 95%, 99%): \n{stats['critical_values']}")
+        print(f"Cointegration Rank: {stats['cointegration_rank']}")
+
+    # Display Engle-Granger results
+    print("\nEngle-Granger Test Results:")
+    print(f"Score: {results['Engle-Granger Test']['score']}")
+    print(f"P-value: {results['Engle-Granger Test']['p_value']}")
+    if results['Engle-Granger Test']['cointegration'] == False:
+        print("Conclusion: No Cointegration")
+
     return results
 
 # function to perform a simple ols regression and retrieve the results
