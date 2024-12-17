@@ -139,9 +139,7 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
         critical_values = johansen_test.cvt  # Critical values (90%, 95%, 99%)
         johansen_results[f"det_order={det_order}"] = {
             "trace_stats": trace_stats,
-            "critical_values": critical_values,
-            "cointegration_rank": sum(trace_stats > critical_values[:, 1])  # Compare with 95% level
-        }
+            "critical_values": critical_values        }
     
     results['Johansen Test'] = johansen_results
 
@@ -158,7 +156,6 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
         print(f"\nDeterministic Order: {det_order}")
         print(f"Trace Statistics: {stats['trace_stats']}")
         print(f"Critical Values (90%, 95%, 99%): \n{stats['critical_values']}")
-        print(f"Cointegration Rank: {stats['cointegration_rank']}")
 
     # Display Engle-Granger results
     print("\nEngle-Granger Test Results:")
@@ -190,7 +187,7 @@ def sbreak_test(X, Y, last_index, first_index=None, significance=0.05):
     Perform a Chow test for a structural break at a specified breakpoint or breakpoint range.
     
     Args:
-        X (array-like): The independent variable(s) (explanatory variable(s)).
+        X (array-like): The independent variables (explanatory variables).
         Y (array-like): The dependent variable (response variable).
         last_index (int): The index of the last data point before the breakpoint.
         first_index (int, optional): The index of the first data point after the breakpoint (for ranges). Defaults to None.
