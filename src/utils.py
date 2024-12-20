@@ -363,87 +363,6 @@ def ljung_box_test(order, results_dict, lags=24):
         print(f"Order {order} not found in the results dictionary.")
         return None
     
-    
-# Funzione per analizzare la cointegrazione tra due serie temporali con opzioni per i parametri di Johansen e confronto con test di Engle-Granger
-
-def analyze_cointegration(ts1, ts2, max_lags=0):
-    """    
-    Argomenti:
-    - ts1, ts2: Serie temporali (array o pandas Series)
-    - max_lags: Numero di lag da includere nella differenziazione per il test di Johansen (predefinito è 0)
-    
-    Restituisce:
-    - Dizionario con i risultati del test di Johansen e del test di Engle-Granger
-    """
-    results = {}  # Dizionario per salvare i risultati finali
-    johansen_results = {}  # Dizionario per i risultati del test di Johansen
-    det_orders = [-1, 0, 1]  # Ordini deterministici: -1 (nessuna costante), 0 (costante), 1 (costante + trend)
-    best_det_order = None  # Variabile per salvare il miglior ordine deterministico
-    best_rank = 0  # Variabile per salvare il rank di cointegrazione più alto trovato
-    
-    # TEST DI JOHANSEN PER LA COINTEGRAZIONE
-    print(" Johansen Test Results ")
-    for det_order in det_orders:  # Itera su ciascun ordine deterministico
-        # Applico il test di Johansen
-        johansen_test = coint_johansen(
-            endog=np.column_stack((ts1, ts2)), det_order=det_order, k_ar_diff=max_lags
-        )
-        trace_stats = johansen_test.lr1  # Statistiche Trace
-        critical_values = johansen_test.cvt  # Valori critici (90%, 95%, 99%)
-
-        # Calcolo del rank di cointegrazione confrontando le statistiche con i valori critici al 95%
-        rank = 0
-        for i, stat in enumerate(trace_stats):
-            if stat > critical_values[i, 2]:  # Confronta con il valore critico al 99%
-                rank += 1
-        
-        # Salvo i risultati per ogni ordine deterministico
-        johansen_results[f"det_order={det_order}"] = {
-            "trace_stats": trace_stats,
-            "critical_values": critical_values,
-            "rank": rank
-        }
-
-        # Stampa i risultati intermedi
-        print(f"\nDeterministic Order: {det_order}")
-        print(f"Trace Statistics: {trace_stats}")
-        print(f"Critical Values (90%, 95%, 99%):\n{critical_values}")
-        print(f"Cointegration Rank: {rank}")
-
-        # Aggiorno il miglior ordine deterministico se trovo un rank più alto
-        if rank > best_rank:
-            best_rank = rank
-            best_det_order = det_order
-
-    # Salvo il miglior ordine deterministico e il rank di cointegrazione nel dizionario dei risultati
-    results['Johansen Test'] = johansen_results
-    results['Best Deterministic Order'] = best_det_order
-    results['Best Rank'] = best_rank
-
-    # Stampo il risultato finale del test di Johansen
-    print("\n Best Cointegration Results ")
-    print(f"Best Deterministic Order: {best_det_order}")
-    print(f"Best Cointegration Rank: {best_rank}")
-
-    # TEST DI ENGLE-GRANGER PER LA COINTEGRAZIONE
-    score, p_value, _ = sm.tsa.coint(ts1, ts2)
-    engle_granger_results = {
-        "score": score,               # Statistica del test di Engle-Granger
-        "p_value": p_value,           # P-value associato al test
-        "cointegration": p_value < 0.05  # Verifica se c'è cointegrazione (p-value < 0.05)
-    }
-    results['Engle-Granger Test'] = engle_granger_results
-
-    # Stampa i risultati del test di Engle-Granger
-    print("\n Engle-Granger Test Results ")
-    print(f"Score: {score}")
-    print(f"P-value: {p_value}")
-    if not engle_granger_results['cointegration']:
-        print("Conclusion: No Cointegration")  # Conclusione se non c'è cointegrazione
-    else:
-        print("Conclusion: Cointegration Found")  # Conclusione se c'è cointegrazione
-
-    return results
 
 
 def compute_critical_values(n_vars, rank, alpha):
@@ -470,6 +389,15 @@ def compute_critical_values(n_vars, rank, alpha):
     return critical_value_trace, critical_value_maxeig
 
 
+# Funzione per creare la matrice delle variabili laggate
+def create_lagged_matrix(data, lags):
+    """Crea le variabili laggate per la rappresentazione VECM."""
+    lagged_data = []
+    for lag in range(1, lags + 1):  # Per ogni lag fino al massimo consentito
+        lagged_data.append(data[lags - lag:-lag])  # Crea la matrice laggata
+    return np.column_stack(lagged_data)  # Combina le colonne in un'unica matrice
+
+
 def jcitest(data, max_lags=1, alpha=0.05):
     """
     Esegui il Johansen Cointegration Test simile a quello di MATLAB.
@@ -493,55 +421,76 @@ def jcitest(data, max_lags=1, alpha=0.05):
     # Ottieni il numero di osservazioni e variabili
     n_obs, n_vars = data.shape
 
-    # Funzione per creare la matrice delle variabili laggate
-    def create_lagged_matrix(data, lags):
-        """Crea le variabili laggate per la rappresentazione VECM."""
-        lagged_data = []
-        for lag in range(1, lags + 1):  # Per ogni lag fino al massimo consentito
-            lagged_data.append(data[lags - lag:-lag])  # Crea la matrice laggata
-        return np.column_stack(lagged_data)  # Combina le colonne in un'unica matrice
+    ## Calcola le differenze prime dei dati
+    #delta_data = np.diff(data, axis=0)  # Differenza prima lungo le righe
+    #Y = delta_data[max_lags:]  # Allinea i dati differenziati per i lag
+    #X_lag = create_lagged_matrix(delta_data, max_lags)  # Crea le variabili laggate
+    #Z_lag = data[max_lags:-1]  # Crea la matrice dei lag
 
-    # Calcola le differenze prime dei dati
-    delta_data = np.diff(data, axis=0)  # Differenza prima lungo le righe
-    Y = delta_data[max_lags:]  # Allinea i dati differenziati per i lag
-    X_lag = create_lagged_matrix(delta_data, max_lags)  # Crea le variabili laggate
-    Z_lag = data[max_lags:-1]  # Crea la matrice dei livelli laggati
-
-    # Mappa dei valori critici per diversi livelli di significatività
-    critical_values_map = {
-        0.10: [10.49, 2.71],  # Valori critici al 90%
-        0.05: [12.32, 4.13],  # Valori critici al 95%
-        0.01: [16.36, 6.94],  # Valori critici al 99%
-    }
+    ## Mappa dei valori critici per diversi livelli di significatività
+    #critical_values_map = {
+    #    0.10: [10.49, 2.71],  # Valori critici al 90%
+    #    0.05: [12.32, 4.13],  # Valori critici al 95%
+    #    0.01: [16.36, 6.94],  # Valori critici al 99%
+    #}
 
     # Controlla se il valore di alpha è valido
-    if alpha not in critical_values_map:
+    if alpha not in [0.10, 0.05, 0.01]:
         raise ValueError("Alpha value not valid. Use 0.10, 0.05 or 0.01.")
 
-    # Seleziona i valori critici appropriati in base ad alpha
-    critical_values = critical_values_map[alpha]
+    ## Seleziona i valori critici appropriati in base ad alpha
+    #critical_values = critical_values_map[alpha]
 
     # Dizionario per salvare i risultati
     results = {}
 
-    # Ciclo su tutte le assunzioni sul trend deterministico
+    ## Ciclo su tutte le assunzioni sul trend deterministico
+    #for det_order in [-1, 0, 1]:
+    #    # Creazione delle componenti deterministiche
+    #    if det_order == -1:
+    #        X = X_lag  # Nessun intercetta o trend
+    #    elif det_order == 0:
+    #        X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])  # Solo intercetta
+    #    elif det_order == 1:
+    #        trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)  # Crea il trend lineare
+    #        X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])  # Intercetta e trend
+#
+    #    # Esegui la regressione di Y su X e calcola i residui
+    #    beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
+    #    residuals_Y = Y - X @ beta_X  # Residui di Y su X
+#
+    #    # Esegui la regressione di Z su X e calcola i residui
+    #    beta_Z = np.linalg.lstsq(X, Z_lag, rcond=None)[0]
+    #    residuals_Z = Z_lag - X @ beta_Z
+
+    # Ciclo sulle assunzioni del trend deterministico
     for det_order in [-1, 0, 1]:
         # Creazione delle componenti deterministiche
         if det_order == -1:
-            X = X_lag  # Nessun intercetta o trend
+            # Nessun intercetta o trend: usa solo le variabili laggate
+            X = create_lagged_matrix(np.diff(data, axis=0), max_lags) # Crea la matrice delle variabili laggate
         elif det_order == 0:
-            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])  # Solo intercetta
+            # Solo intercetta: aggiungi una colonna di 1
+            X = np.hstack([create_lagged_matrix(np.diff(data, axis=0), max_lags),
+                           np.ones((data.shape[0] - max_lags, 1))])
         elif det_order == 1:
-            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)  # Crea il trend lineare
-            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])  # Intercetta e trend
+            # Intercetta e trend: aggiungi una colonna di 1 e un trend lineare
+            trend = np.arange(1, data.shape[0] - max_lags + 1).reshape(-1, 1)
+            X = np.hstack([create_lagged_matrix(np.diff(data, axis=0), max_lags),
+                           np.ones((data.shape[0] - max_lags, 1)), trend])
 
-        # Esegui la regressione di Y su X e calcola i residui
+        # Calcola le differenze prime di Y e allinea con i lag
+        delta_data = np.diff(data, axis=0)  # Differenze prime
+        Y = delta_data[max_lags:]  # Allinea Y per il numero di lag
+
+        # Regressione di Y sulle variabili laggate
         beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
-        residuals_Y = Y - X @ beta_X  # Residui di Y su X
+        residuals_Y = Y - X @ beta_X  # Residui di Y
 
-        # Esegui la regressione di Z su X e calcola i residui
-        beta_Z = np.linalg.lstsq(X, Z_lag, rcond=None)[0]
-        residuals_Z = Z_lag - X @ beta_Z
+        # Regressione di Z (livelli originali) sulle variabili laggate
+        Z = data[max_lags:-1]
+        beta_Z = np.linalg.lstsq(X, Z, rcond=None)[0]  # Coefficienti della regressione
+        residuals_Z = Z - X @ beta_Z  # Residui di Z
 
         # Calcola le matrici di covarianza
         S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui YY
@@ -567,36 +516,81 @@ def jcitest(data, max_lags=1, alpha=0.05):
         trace_p_values = [p_value_chi2(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
         max_eigen_p_values = [p_value_chi2(stat, 1) for stat in max_eigen_stats]
 
-        # Determina il rango basato sui valori critici
-        rank_trace = sum(stat > critical_values[0] for stat in trace_stats)  # Rango per trace
-        rank_maxeig = sum(stat > critical_values[1] for stat in max_eigen_stats)  # Rango per max eigenvalue
+        # Calcola dinamicamente i valori critici per trace e max eigenvalue
+        trace_critical_values = []
+        maxeig_critical_values = []
+        for r in range(len(eigenvalues)):
+            crit_trace, crit_maxeig = compute_critical_values(n_vars, r + 1, alpha)
+            trace_critical_values.append(crit_trace)
+            maxeig_critical_values.append(crit_maxeig)
+
+        ## Determina il rango basato sui valori critici
+        #rank_trace = sum(stat > critical_values[0] for stat in trace_stats)  # Rango per trace
+        #rank_maxeig = sum(stat > critical_values[1] for stat in max_eigen_stats)  # Rango per max eigenvalue
+
+        # Determina le ipotesi per trace e max eigenvalue
+        trace_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(trace_stats, trace_critical_values)]
+        maxeig_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(max_eigen_stats, maxeig_critical_values)]
+
+        # Determina il rango basato sulle statistiche trace
+        rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
 
         # Crea una tabella dei risultati formattata
         results_table = "\n".join([
-            f"Deterministic Trend Assumption: {det_order}",
-            f"Significance Level: {alpha:.2f}",
+            f"Assunzione sul Trend Deterministico: {det_order}",
+            f"Livello di Significatività: {alpha:.2f}",
             "r | h  |  stat    | cValue   | pValue  | eigVal",
             "-" * 60,
-            *(f"{i} | {stat > critical_values[0]} | {stat:.4f} | {critical_values[0]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
+            *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
               for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
             f"\nRank: {rank_trace}",
-            #f"Rango MaxEig: {rank_maxeig}\n",
             "=" * 60
         ])
 
-        # Salva i risultati per il det_order corrente
+        # Salva i risultati per questa assunzione di det_order
         results[f"det_order_{det_order}"] = {
-            "eigenvalues": eigenvalues,
-            "eigenvectors": eigenvectors,
-            "trace_stats": trace_stats,
-            "trace_p_values": trace_p_values,
-            "max_eigen_stats": max_eigen_stats,
-            "max_eigen_p_values": max_eigen_p_values,
-            "critical_values": critical_values,
-            "rank_trace": rank_trace,
-            "rank_maxeig": rank_maxeig,
-            "results_table": results_table
+            "eigenvalues": eigenvalues,  # Autovalori
+            "eigenvectors": eigenvectors,  # Autovettori
+            "trace_stats": trace_stats,  # Statistiche trace
+            "trace_p_values": trace_p_values,  # P-value trace
+            "max_eigen_stats": max_eigen_stats,  # Statistiche max eigenvalue
+            "max_eigen_p_values": max_eigen_p_values,  # P-value max eigenvalue
+            "trace_critical_values": trace_critical_values,  # Valori critici trace
+            "maxeig_critical_values": maxeig_critical_values,  # Valori critici max eigenvalue
+            "trace_hypotheses": trace_hypotheses,  # Ipotesi trace
+            "maxeig_hypotheses": maxeig_hypotheses,  # Ipotesi max eigenvalue
+            "rank_trace": rank_trace,  # Rango basato sulle statistiche trace
+            "results_table": results_table,  # Tabella dei risultati formattata
         }
+
+    return results
+
+        ## Crea una tabella dei risultati formattata
+        #results_table = "\n".join([
+        #    f"Deterministic Trend Assumption: {det_order}",
+        #    f"Significance Level: {alpha:.2f}",
+        #    "r | h  |  stat    | cValue   | pValue  | eigVal",
+        #    "-" * 60,
+        #    *(f"{i} | {stat > critical_values[0]} | {stat:.4f} | {critical_values[0]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
+        #      for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
+        #    f"\nRank: {rank_trace}",
+        #    #f"Rango MaxEig: {rank_maxeig}\n",
+        #    "=" * 60
+        #])
+#
+        ## Salva i risultati per il det_order corrente
+        #results[f"det_order_{det_order}"] = {
+        #    "eigenvalues": eigenvalues,
+        #    "eigenvectors": eigenvectors,
+        #    "trace_stats": trace_stats,
+        #    "trace_p_values": trace_p_values,
+        #    "max_eigen_stats": max_eigen_stats,
+        #    "max_eigen_p_values": max_eigen_p_values,
+        #    "critical_values": critical_values,
+        #    "rank_trace": rank_trace,
+        #    "rank_maxeig": rank_maxeig,
+        #    "results_table": results_table
+        #}
 
     return results
 
@@ -738,6 +732,89 @@ def granger_causality_test(y, x, max_lag):
         "ssr_unrestricted": ssr_unrestricted,
         "conclusion": conclusion,
     }
+
+
+
+# Funzione per analizzare la cointegrazione tra due serie temporali con opzioni per i parametri di Johansen e confronto con test di Engle-Granger
+
+#def analyze_cointegration(ts1, ts2, max_lags=0):
+#    """    
+#    Argomenti:
+#    - ts1, ts2: Serie temporali (array o pandas Series)
+#    - max_lags: Numero di lag da includere nella differenziazione per il test di Johansen (predefinito è 0)
+#    
+#    Restituisce:
+#    - Dizionario con i risultati del test di Johansen e del test di Engle-Granger
+#    """
+#    results = {}  # Dizionario per salvare i risultati finali
+#    johansen_results = {}  # Dizionario per i risultati del test di Johansen
+#    det_orders = [-1, 0, 1]  # Ordini deterministici: -1 (nessuna costante), 0 (costante), 1 (costante + trend)
+#    best_det_order = None  # Variabile per salvare il miglior ordine deterministico
+#    best_rank = 0  # Variabile per salvare il rank di cointegrazione più alto trovato
+#    
+#    # TEST DI JOHANSEN PER LA COINTEGRAZIONE
+#    print(" Johansen Test Results ")
+#    for det_order in det_orders:  # Itera su ciascun ordine deterministico
+#        # Applico il test di Johansen
+#        johansen_test = coint_johansen(
+#            endog=np.column_stack((ts1, ts2)), det_order=det_order, k_ar_diff=max_lags
+#        )
+#        trace_stats = johansen_test.lr1  # Statistiche Trace
+#        critical_values = johansen_test.cvt  # Valori critici (90%, 95%, 99%)
+#
+#        # Calcolo del rank di cointegrazione confrontando le statistiche con i valori critici al 95%
+#        rank = 0
+#        for i, stat in enumerate(trace_stats):
+#            if stat > critical_values[i, 2]:  # Confronta con il valore critico al 99%
+#                rank += 1
+#        
+#        # Salvo i risultati per ogni ordine deterministico
+#        johansen_results[f"det_order={det_order}"] = {
+#            "trace_stats": trace_stats,
+#            "critical_values": critical_values,
+#            "rank": rank
+#        }
+#
+#        # Stampa i risultati intermedi
+#        print(f"\nDeterministic Order: {det_order}")
+#        print(f"Trace Statistics: {trace_stats}")
+#        print(f"Critical Values (90%, 95%, 99%):\n{critical_values}")
+#        print(f"Cointegration Rank: {rank}")
+#
+#        # Aggiorno il miglior ordine deterministico se trovo un rank più alto
+#        if rank > best_rank:
+#            best_rank = rank
+#            best_det_order = det_order
+#
+#    # Salvo il miglior ordine deterministico e il rank di cointegrazione nel dizionario dei risultati
+#    results['Johansen Test'] = johansen_results
+#    results['Best Deterministic Order'] = best_det_order
+#    results['Best Rank'] = best_rank
+#
+#    # Stampo il risultato finale del test di Johansen
+#    print("\n Best Cointegration Results ")
+#    print(f"Best Deterministic Order: {best_det_order}")
+#    print(f"Best Cointegration Rank: {best_rank}")
+#
+#    # TEST DI ENGLE-GRANGER PER LA COINTEGRAZIONE
+#    score, p_value, _ = sm.tsa.coint(ts1, ts2)
+#    engle_granger_results = {
+#        "score": score,               # Statistica del test di Engle-Granger
+#        "p_value": p_value,           # P-value associato al test
+#        "cointegration": p_value < 0.05  # Verifica se c'è cointegrazione (p-value < 0.05)
+#    }
+#    results['Engle-Granger Test'] = engle_granger_results
+#
+#    # Stampa i risultati del test di Engle-Granger
+#    print("\n Engle-Granger Test Results ")
+#    print(f"Score: {score}")
+#    print(f"P-value: {p_value}")
+#    if not engle_granger_results['cointegration']:
+#        print("Conclusion: No Cointegration")  # Conclusione se non c'è cointegrazione
+#    else:
+#        print("Conclusion: Cointegration Found")  # Conclusione se c'è cointegrazione
+#
+#    return results
 
 # Funzione per plottare la seasonal decomposition di una time series 
 #def plot_decomposition(df, column, window_sizes, model):
