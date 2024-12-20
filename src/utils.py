@@ -12,12 +12,13 @@ from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.vector_ar.vecm import coint_johansen
 from statsmodels.tsa.stattools import coint
-from scipy.stats import f
+from scipy.stats import f, chi2
 import warnings
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.tsatools import lagmat
-from scipy.linalg import eig
+from scipy.linalg import eig, inv
 from statsmodels.tsa.stattools import adfuller
+from numpy.polynomial.polynomial import Polynomial
 
 
 
@@ -89,33 +90,78 @@ def plot_rolling_variance(df, column, window_sizes, ylabel=None, title=None, sta
     ax.legend(fontsize=20)
     return ax
 
-# Funzione per plottare la seasonal decomposition di una time series 
-def plot_decomposition(df, column, window_sizes, model):
 
+def ts_decomposition(time_series, period, trend_method="moving_average", poly_degree=2):
     """
-        Argomenti della funzione:
-        df (pd.Dataframe): dataframe della time series.
-        column (str): nome della varibile/time series da estrarre dal dataframe.
-        window_sizes: lista con i valori dei periodi coi quali fare la decomposizione (1 = annual, 4 = quarterly, 12 = monthly, 365 = daily etc)
-        model (str): "additive" o "multiplicative".
+    Scompone la time series in trend, stagionalità e residui. 
+
+    Argomenti:
+        time_series (pd.Series): la time series.
+        period (int): la finestra temporale (e.g., 12 per dati mensili).
+        trend_method (str): Metodo per estrarre il trend ("moving_average" o "polynomial").
+        poly_degree (int): grado del polinomio per l'estrazione del trend (se usato "polynomial").
+
+    Risultato:
+        dict: contiene trend, stagionalità e residui.
     """
+    # Step 1: Compute the trend
+    if trend_method == "moving_average":
+        trend = time_series.rolling(window=period, center=True).mean()
+    elif trend_method == "polynomial":
+        # Fit a polynomial to the time series index and values
+        x = np.arange(len(time_series))
+        mask = ~np.isnan(time_series)  # Ignore NaNs in the polynomial fit
+        coefs = Polynomial.fit(x[mask], time_series[mask], poly_degree).convert().coef
+        trend = np.polyval(np.flip(coefs), x)
+        trend = pd.Series(trend, index=time_series.index)
+    else:
+        raise ValueError("Invalid trend_method. Choose 'moving_average' or 'polynomial'.")
 
-    mpl.rcParams['font.family'] = 'Arial'
-    mpl.rcParams['font.size'] = 16
+    # Step 2: Detrend the series (original series - trend)
+    detrended = time_series - trend
 
-    #
-    mpl.rcParams['figure.facecolor'] = 'white'
-    mpl.rcParams['axes.facecolor'] = 'white'
-    mpl.rcParams['savefig.facecolor'] = 'white'
+    # Step 3: Estimate seasonality by averaging over periods
+    seasonal = detrended.groupby(time_series.index % period).transform("mean")
 
-    res = sm.tsa.seasonal_decompose(df, model=model, period=window_sizes)
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(20, 15))
-    res.observed.plot(ax=ax1, title='Raw')
-    res.seasonal.plot(ax=ax2, title='Seasonal')
-    res.trend.plot(ax=ax3, title='Trend')
-    res.resid.plot(ax=ax4, title='Residual')
+    # Step 4: Compute residuals (original series - trend - seasonality)
+    residuals = time_series - trend - seasonal
+
+    # Step 5: Plot the decomposition
+    plt.figure(figsize=(20, 8))
+
+    # Original Series
+    plt.subplot(4, 1, 1)
+    plt.plot(time_series, label="Original", color="blue")
+    plt.title("Original Time Series")
+    plt.legend()
+
+    # Trend
+    plt.subplot(4, 1, 2)
+    plt.plot(trend, label=f"Trend ({trend_method})", color="orange")
+    plt.title("Trend")
+    plt.legend()
+
+    # Seasonality
+    plt.subplot(4, 1, 3)
+    plt.plot(seasonal, label="Seasonality", color="green")
+    plt.title("Seasonality")
+    plt.legend()
+
+    # Residuals
+    plt.subplot(4, 1, 4)
+    plt.plot(residuals, label="Residuals", color="red")
+    plt.title("Residuals")
+    plt.legend()
+
     plt.tight_layout()
     plt.show()
+
+    # Return components as a dictionary
+    return {
+        "trend": trend,
+        "seasonal": seasonal,
+        "residuals": residuals
+    }
 
 
 # Funzione per fittare modello/i ARIMA (p, d, q) ad una time series
@@ -224,7 +270,7 @@ def analyze_order(order, results_dict):
         #print(serial_correlation_test)
 
         # Plot Residuals
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(25, 8))
         plt.plot(residuals, label="Residuals", color="blue")
         plt.axhline(0, color='red', linestyle='--', linewidth=1)
         plt.title(f"Residuals for ARIMA order {order}")
@@ -235,13 +281,13 @@ def analyze_order(order, results_dict):
         plt.show()
 
         # Plot Autocorrelation of Residuals
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(25, 6))
         plot_acf(residuals, lags=24)
         plt.title(f"Autocorrelation of Residuals for ARIMA order {order}")
         plt.show()
 
         # Plot Fitted Values Against True Values
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(25, 8))
         plt.plot(model_fit.data.endog, label="True Values", color="blue", alpha=0.6)
         plt.plot(fitted_values, label="Fitted Values", color="orange", alpha=0.8)
         plt.title(f"Fitted vs True Values for ARIMA order {order}")
@@ -399,6 +445,328 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
 
     return results
 
+
+def compute_critical_values(n_vars, rank, alpha):
+    """
+    Compute critical values dynamically using the Chi-squared distribution.
+    
+    Parameters:
+        n_vars (int): Number of variables in the dataset.
+        rank (int): Current rank being tested.
+        alpha (float): Significance level (e.g., 0.05, 0.01).
+
+    Returns:
+        tuple: (critical_value_trace, critical_value_maxeig)
+    """
+    # Degrees of freedom for the trace test
+    dof_trace = (n_vars - rank) * (n_vars - rank - 1) / 2
+    # Degrees of freedom for the max eigenvalue test
+    dof_maxeig = 1
+
+    # Compute critical values using the Chi-squared inverse CDF
+    critical_value_trace = chi2.ppf(1 - alpha, dof_trace)
+    critical_value_maxeig = chi2.ppf(1 - alpha, dof_maxeig)
+
+    return critical_value_trace, critical_value_maxeig
+
+
+def jcitest(data, max_lags=1, alpha=0.05):
+    """
+    Esegui il Johansen Cointegration Test simile a quello di MATLAB.
+
+    Args:
+        data (np.ndarray o pd.DataFrame): Le time series (n_obs x n_vars).
+        max_lags (int): Numero massimo di lag inclusi nel modello.
+        alpha (float): Livello di significatività per i valori critici (0.10, 0.05 o 0.01).
+
+    Results:
+        dict: Risultati per ogni assunzione sul trend deterministico (-1, 0, 1).
+    """
+    # Controlla se i dati sono in formato Pandas e convertili in array NumPy
+    if isinstance(data, pd.DataFrame) or isinstance(data, pd.Series):
+        data = data.to_numpy()  # Converte oggetti Pandas in array NumPy
+
+    # Verifica che i dati siano bidimensionali
+    if data.ndim != 2:
+        raise ValueError("Input data must be bidimensional (n_obs x n_vars).")
+
+    # Ottieni il numero di osservazioni e variabili
+    n_obs, n_vars = data.shape
+
+    # Funzione per creare la matrice delle variabili laggate
+    def create_lagged_matrix(data, lags):
+        """Crea le variabili laggate per la rappresentazione VECM."""
+        lagged_data = []
+        for lag in range(1, lags + 1):  # Per ogni lag fino al massimo consentito
+            lagged_data.append(data[lags - lag:-lag])  # Crea la matrice laggata
+        return np.column_stack(lagged_data)  # Combina le colonne in un'unica matrice
+
+    # Calcola le differenze prime dei dati
+    delta_data = np.diff(data, axis=0)  # Differenza prima lungo le righe
+    Y = delta_data[max_lags:]  # Allinea i dati differenziati per i lag
+    X_lag = create_lagged_matrix(delta_data, max_lags)  # Crea le variabili laggate
+    Z_lag = data[max_lags:-1]  # Crea la matrice dei livelli laggati
+
+    # Mappa dei valori critici per diversi livelli di significatività
+    critical_values_map = {
+        0.10: [10.49, 2.71],  # Valori critici al 90%
+        0.05: [12.32, 4.13],  # Valori critici al 95%
+        0.01: [16.36, 6.94],  # Valori critici al 99%
+    }
+
+    # Controlla se il valore di alpha è valido
+    if alpha not in critical_values_map:
+        raise ValueError("Alpha value not valid. Use 0.10, 0.05 or 0.01.")
+
+    # Seleziona i valori critici appropriati in base ad alpha
+    critical_values = critical_values_map[alpha]
+
+    # Dizionario per salvare i risultati
+    results = {}
+
+    # Ciclo su tutte le assunzioni sul trend deterministico
+    for det_order in [-1, 0, 1]:
+        # Creazione delle componenti deterministiche
+        if det_order == -1:
+            X = X_lag  # Nessun intercetta o trend
+        elif det_order == 0:
+            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])  # Solo intercetta
+        elif det_order == 1:
+            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)  # Crea il trend lineare
+            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])  # Intercetta e trend
+
+        # Esegui la regressione di Y su X e calcola i residui
+        beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
+        residuals_Y = Y - X @ beta_X  # Residui di Y su X
+
+        # Esegui la regressione di Z su X e calcola i residui
+        beta_Z = np.linalg.lstsq(X, Z_lag, rcond=None)[0]
+        residuals_Z = Z_lag - X @ beta_Z
+
+        # Calcola le matrici di covarianza
+        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui YY
+        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza dei residui ZZ
+        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza dei residui YZ
+        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui ZY
+
+        # Calcola la matrice degli autovalori
+        eig_matrix = inv(S00) @ S01 @ inv(S11) @ S10
+        eigenvalues, eigenvectors = eig(eig_matrix)  # Autovalori e autovettori
+        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo gli autovalori reali positivi
+
+        # Calcola le statistiche trace e max eigenvalue
+        n_obs_eff = n_obs - max_lags  # Numero effettivo di osservazioni
+        trace_stats = -n_obs_eff * np.cumsum(np.log(1 - eigenvalues[::-1]))[::-1]  # Statistica trace
+        max_eigen_stats = -n_obs_eff * np.log(1 - eigenvalues)  # Statistica max eigenvalue
+
+        # Funzione per calcolare i p-value usando la distribuzione Chi-quadro
+        def p_value_chi2(stat, dof):
+            return 1 - chi2.cdf(stat, dof)
+
+        # Calcola i p-value per le statistiche trace e max eigenvalue
+        trace_p_values = [p_value_chi2(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
+        max_eigen_p_values = [p_value_chi2(stat, 1) for stat in max_eigen_stats]
+
+        # Determina il rango basato sui valori critici
+        rank_trace = sum(stat > critical_values[0] for stat in trace_stats)  # Rango per trace
+        rank_maxeig = sum(stat > critical_values[1] for stat in max_eigen_stats)  # Rango per max eigenvalue
+
+        # Crea una tabella dei risultati formattata
+        results_table = "\n".join([
+            f"Deterministic Trend Assumption: {det_order}",
+            f"Significance Level: {alpha:.2f}",
+            "r | h  |  stat    | cValue   | pValue  | eigVal",
+            "-" * 60,
+            *(f"{i} | {stat > critical_values[0]} | {stat:.4f} | {critical_values[0]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
+              for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
+            f"\nRank: {rank_trace}",
+            #f"Rango MaxEig: {rank_maxeig}\n",
+            "=" * 60
+        ])
+
+        # Salva i risultati per il det_order corrente
+        results[f"det_order_{det_order}"] = {
+            "eigenvalues": eigenvalues,
+            "eigenvectors": eigenvectors,
+            "trace_stats": trace_stats,
+            "trace_p_values": trace_p_values,
+            "max_eigen_stats": max_eigen_stats,
+            "max_eigen_p_values": max_eigen_p_values,
+            "critical_values": critical_values,
+            "rank_trace": rank_trace,
+            "rank_maxeig": rank_maxeig,
+            "results_table": results_table
+        }
+
+    return results
+
+
+
+
+def egcitest(Y, X, max_lags=0):
+    """
+    Implementazione manuale del test di Engle-Granger per la cointegrazione.
+
+    Argomenti:
+        Y (array-like): Serie temporale dipendente.
+        X (array-like): Serie temporale indipendente.
+        max_lags (int): max_lags (int): Numero massimo di lag inclusi nel ADF test (default = 0).
+
+    Restituisce:
+        dict: Risultati del test con statistiche, p-value e conclusione.
+    """
+
+    if not isinstance(X, (pd.Series, pd.DataFrame)):
+        X = pd.Series(X)
+    if not isinstance(Y, (pd.Series, pd.DataFrame)):
+        Y = pd.Series(Y)
+
+    # Regressione OLS di Y su X
+    #if "const" not in X.columns: # Controllo se X ha già una colonna di costante; in caso contrario, la aggiungo.
+    X = sm.add_constant(X)  # Aggiunge un termine costante al modello
+    model = sm.OLS(Y, X).fit()  # Esegue la regressione OLS
+    residuals = model.resid  # Estrae i residui dal modello
+
+    # Test ADF sui residui per valutare la stazionarietà
+    adf_result = adfuller(residuals, maxlag=max_lags, autolag=None if max_lags > 0 else "AIC")
+    adf_statistic = adf_result[0]  # Statistica del test ADF
+    p_value = adf_result[1]  # p-value del test ADF
+    critical_values = adf_result[4]  # Valori critici del test ADF
+
+    # Calcolo dell'errore standard residuo
+    # L'errore standard residuo tiene conto dei gradi di libertà
+    residual_std_error = np.sqrt(np.sum(residuals**2) / (len(residuals) - len(model.params)))
+
+    # Conclusione sulla cointegrazione
+    conclusion = "Cointegrated" if p_value < 0.05 else "Not Cointegrated"
+
+    # Stampiamo i risultati del test
+    print("\nEngle-Granger Test Results")
+    print("OLS Results:")
+    print(f"  Coefficients: {model.params}")  # Coefficienti stimati dal modello
+    print(f"  Residual SE: {residual_std_error:.4f}")  # Errore standard residuo
+    print("\nADF Test on the Residuals:")
+    print(f"  Stat: {adf_statistic:.4f}")  # Statistica del test ADF
+    print(f"  P-value: {p_value:.4f}")  # p-value del test
+    print("  Critical Values:")
+    for key, value in critical_values.items():
+        print(f"    {key}: {value:.4f}")  # Stampiamo i valori critici formattati
+    print(f"Conclusion: {conclusion}")  # Stampiamo la conclusione
+
+    # Restituiamo i risultati come dizionario
+    return {
+        "coefficients": model.params,  # Coefficienti del modello OLS
+        "residuals": residuals,  # Residui del modello
+        "adf_statistic": adf_statistic,  # Statistica del test ADF
+        "p_value": p_value,  # p-value del test ADF
+        "critical_values": critical_values,  # Valori critici del test ADF
+        "conclusion": conclusion,  # Conclusione sulla cointegrazione
+    }
+
+
+
+def granger_causality_test(y, x, max_lag):
+    """
+    Implementazione manuale del test di causalità di Granger.
+
+    Argomenti:
+        y (np.ndarray): Variabile dipendente (serie target).
+        x (np.ndarray): Variabile indipendente (serie predittore).
+        max_lag (int): Numero massimo di ritardi da includere.
+
+    Risultato:
+        dict: Contiene F-statistic, p-value e conclusione del test.
+    """
+    # Se x è un array numpy, convertilo in una Serie Pandas
+    if isinstance(x, np.ndarray):
+        x = pd.Series(x)
+    # Se y è un array numpy, convertilo in una Serie Pandas
+    if isinstance(y, np.ndarray):
+        y = pd.Series(y)
+
+    # Controllo della lunghezza delle serie
+    if len(x) != len(y):
+        raise ValueError("Input time series must have the same lenght.")
+    # Verifica che il numero massimo di lag sia compatibile con la lunghezza della serie
+    if max_lag >= len(y):
+        raise ValueError("max_lag must be less than the lenght of input time series.")
+
+    # Funzione per creare una matrice di ritardi per una serie temporale
+    def create_lagged_matrix(series, lags):
+        # Costruisce una matrice con colonne che rappresentano ritardi successivi della serie
+        return np.column_stack([series.shift(i).to_numpy() for i in range(1, lags + 1)])[lags:]
+
+    # Creazione delle matrici di ritardi per Y e X
+    lagged_y = create_lagged_matrix(y, max_lag)  # Matrice dei ritardi per Y
+    lagged_x = create_lagged_matrix(x, max_lag)  # Matrice dei ritardi per X
+    trimmed_y = y[max_lag:].to_numpy()  # Allinea Y con le matrici di ritardo
+
+    # Modello ristretto: regressione di Y sui propri ritardi
+    restricted_model_data = sm.add_constant(lagged_y)  # Aggiunge una costante per la regressione
+    restricted_model = sm.OLS(trimmed_y, restricted_model_data).fit()  # Esegue la regressione
+    ssr_restricted = restricted_model.ssr  # Somma dei residui quadrati (modello ristretto)
+
+    # Modello non ristretto: regressione di Y sui ritardi di Y e X
+    unrestricted_model_data = sm.add_constant(np.hstack([lagged_y, lagged_x]))  # Aggiunge X ai predittori
+    unrestricted_model = sm.OLS(trimmed_y, unrestricted_model_data).fit()  # Esegue la regressione
+    ssr_unrestricted = unrestricted_model.ssr  # Somma dei residui quadrati (modello non ristretto)
+
+    # Calcolo della statistica F per il test di causalità di Granger
+    n_lags = max_lag  # Gradi di libertà per il numeratore
+    df_resid = len(trimmed_y) - unrestricted_model_data.shape[1]  # Gradi di libertà per il denominatore
+    f_stat = ((ssr_restricted - ssr_unrestricted) / n_lags) / (ssr_unrestricted / df_resid)  # Formula della statistica F
+
+    # Calcolo del p-value utilizzando la distribuzione F
+    p_value = 1 - f.cdf(f_stat, n_lags, df_resid)  # Calcola il p-value dalla cdf della distribuzione F
+
+    # Step 4: Conclusion
+    conclusion = "X Granger-causes Y" if p_value < 0.05 else "No Granger causality from X to Y"
+
+    # Print Results
+    print("\nGranger Causality Test Results")
+    print(f"Restricted SSR: {ssr_restricted:.4f}")
+    print(f"Unrestricted SSR: {ssr_unrestricted:.4f}")
+    print(f"F-statistic: {f_stat:.4f}")
+    print(f"P-value: {p_value:.4f}")
+    print(f"Conclusion: {conclusion}")
+
+    # Return results as a dictionary
+    return {
+        "f_stat": f_stat,
+        "p_value": p_value,
+        "ssr_restricted": ssr_restricted,
+        "ssr_unrestricted": ssr_unrestricted,
+        "conclusion": conclusion,
+    }
+
+# Funzione per plottare la seasonal decomposition di una time series 
+#def plot_decomposition(df, column, window_sizes, model):
+#
+#    """
+#        Argomenti della funzione:
+#        df (pd.Dataframe): dataframe della time series.
+#        column (str): nome della varibile/time series da estrarre dal dataframe.
+#        window_sizes: lista con i valori dei periodi coi quali fare la decomposizione (1 = annual, 4 = quarterly, 12 = monthly, 365 = daily etc)
+#        model (str): "additive" o "multiplicative".
+#    """
+#
+#    mpl.rcParams['font.family'] = 'Arial'
+#    mpl.rcParams['font.size'] = 16
+#
+#    #
+#    mpl.rcParams['figure.facecolor'] = 'white'
+#    mpl.rcParams['axes.facecolor'] = 'white'
+#    mpl.rcParams['savefig.facecolor'] = 'white'
+#
+#    res = sm.tsa.seasonal_decompose(df, model=model, period=window_sizes)
+#    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(20, 15))
+#    res.observed.plot(ax=ax1, title='Raw')
+#    res.seasonal.plot(ax=ax2, title='Seasonal')
+#    res.trend.plot(ax=ax3, title='Trend')
+#    res.resid.plot(ax=ax4, title='Residual')
+#    plt.tight_layout()
+#    plt.show()
+
 # function to perform a simple ols regression and retrieve the results
 #def ols_reg(y, x):
 #
@@ -474,119 +842,3 @@ def analyze_cointegration(ts1, ts2, max_lags=0):
 #        print(f"No structural break detected at the breakpoint (p-value = {p_value:.4f})")
 #
 #    return f_stat, p_value
-
-def johansen_test_manual(series1, series2, det_order=0, k_ar_diff=1):
-    """
-    Implementazione manuale del test di cointegrazione di Johansen.
-
-    Argomenti:
-        series1 (array-like): Prima serie temporale (es. Y).
-        series2 (array-like): Seconda serie temporale (es. X).
-        det_order (int): Ordine deterministico: 
-                         -1 = nessun costante, 
-                          0 = costante, 
-                          1 = costante e trend.
-        k_ar_diff (int): Numero di lag da includere nei termini di differenziazione.
-
-    
-    Restituisce:
-        dict: Statistiche Trace, valori critici e rank di cointegrazione.
-    """
-    # STEP 1: Combina le serie in un array 2D
-    data = np.column_stack((series1, series2))
-
-    # STEP 1: Trasforma le serie in First Difference
-    delta_data = np.diff(data, axis=0)
-    n_obs = delta_data.shape[0]  # Numero di osservazioni dopo differenziazione
-
-    # STEP 2: Costruzione delle matrici di lag
-    X_lag = lagmat(data[:-1], maxlag=k_ar_diff, trim="both", original="ex")
-    Y = delta_data[k_ar_diff:]
-
-    # STEP 3: Regressione per stimare il modello VECM
-    Z = np.hstack([X_lag, np.ones((Y.shape[0], 1))]) if det_order >= 0 else X_lag
-    beta = np.linalg.lstsq(Z, Y, rcond=None)[0]
-    residuals = Y - Z @ beta
-
-    # STEP 4: Calcolo delle matrici della varianza-covarianza
-    S11 = residuals.T @ residuals / n_obs  # Covarianza dei residui
-    S00 = np.cov(data[:-1], rowvar=False, bias=True)
-
-    # STEP 5: Matrice Pi e decomposizione agli autovalori
-    Pi = np.linalg.inv(S00) @ S11
-    eigenvalues, _ = eig(Pi)  # Calcolo degli autovalori
-
-    # STEP 6: Calcolo delle statistiche trace
-    eigenvalues = np.real(eigenvalues)  # Autovalori reali
-    eigenvalues = eigenvalues[eigenvalues > 0]  # Considera solo autovalori positivi
-    trace_stats = -n_obs * np.cumsum(np.log(1 - eigenvalues))
-
-    # Valori critici per il test
-    critical_values = np.array([
-        [10.4741, 12.3212, 16.364],  # Rank 0
-        [2.9762, 4.1296, 6.9406]     # Rank 1
-    ])
-
-    # Determina il rank
-    rank = sum(trace_stats > critical_values[:, 1])  # Confronto con valori critici al 95%
-
-    # Risultati
-    results = {
-        "eigenvalues": eigenvalues,
-        "trace_stats": trace_stats,
-        "critical_values": critical_values,
-        "rank": rank
-    }
-
-    print("Eigenvalues:", results["eigenvalues"])
-    print("Trace Stats:", results["trace_stats"])
-    print("Critical Values (90%, 95%, 99%):\n", results["critical_values"])
-    print("Cointegration Rank:", results["rank"])
-    
-    return results
-
-
-def engle_granger_test_manual(Y, X):
-    """
-    Implementazione manuale del test di Engle-Granger per la cointegrazione.
-
-    Argomenti:
-        Y (array-like): Serie temporale dipendente.
-        X (array-like): Serie temporale indipendente.
-
-    Restituisce:
-        dict: Risultati del test con statistiche, p-value e conclusione.
-    """
-    # STEP 1: Stima della regressione Y = alpha + beta * X + residui
-    X = sm.add_constant(X)  # Aggiungo una costante (intercetta)
-    model = sm.OLS(Y, X).fit()  # Regressione tramite OLS
-    residuals = model.resid     # Residui della regressione
-
-    # STEP 2: Test di stazionarietà sui residui (ADF Test)
-    adf_result = adfuller(residuals, regression='c', autolag='AIC')
-    test_statistic, p_value, used_lags, n_obs, critical_values, ic_best = adf_result
-
-    # STEP 3: Interpretazione del risultato
-    conclusion = "Cointegration Found" if p_value < 0.05 else "No Cointegration"
-
-    # Risultati in un dizionario
-    results = {
-        "ADF Statistic": test_statistic,
-        "P-Value": p_value,
-        "Used Lags": used_lags,
-        "Number of Observations": n_obs,
-        "Critical Values": critical_values,
-        "Residuals": residuals,
-        "Conclusion": conclusion
-    }
-
-    # Stampa dei risultati
-    print("### Engle-Granger Test Results ###")
-    print(f"ADF Statistic: {test_statistic:.4f}")
-    print(f"P-Value: {p_value:.4f}")
-    print("Critical Values:")
-    for key, value in critical_values.items():
-        print(f"  {key}: {value:.4f}")
-    print(f"Conclusion: {conclusion}")
-
-    return results
