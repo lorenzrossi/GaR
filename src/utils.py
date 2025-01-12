@@ -19,6 +19,7 @@ from statsmodels.tsa.tsatools import lagmat
 from scipy.linalg import eig, inv
 from statsmodels.tsa.stattools import adfuller
 from numpy.polynomial.polynomial import Polynomial
+from tabulate import tabulate
 
 
 
@@ -365,235 +366,347 @@ def ljung_box_test(order, results_dict, lags=24):
     
 
 
-def compute_critical_values(n_vars, rank, alpha):
+def compute_critical_values(rank, alpha, det_order):
     """
-    Compute critical values dynamically using the Chi-squared distribution.
-    
-    Parameters:
-        n_vars (int): Number of variables in the dataset.
-        rank (int): Current rank being tested.
-        alpha (float): Significance level (e.g., 0.05, 0.01).
+    Calcola i valori critici per il test di Johansen basati su tabelle predefinite.
+
+    Args:
+        n_vars (int): Numero di variabili nel dataset (es. 2).
+        rank (int): Rango attualmente testato (es. 0 o 1).
+        alpha (float): Livello di significatività (es. 0.10, 0.05, 0.01).
+        det_order (int): Assunzione sul trend deterministico (-1, 0, 1).
 
     Returns:
-        tuple: (critical_value_trace, critical_value_maxeig)
+        tuple: (valore_critico_trace, valore_critico_maxeig)
     """
-    # Degrees of freedom for the trace test
-    dof_trace = (n_vars - rank) * (n_vars - rank - 1) / 2
-    # Degrees of freedom for the max eigenvalue test
-    dof_maxeig = 1
+    # Tabelle dei valori critici (esempio per n_vars = 2)
+    johansen_critical_values = {
+        -1: {  # Nessuna intercetta o trend
+            0: {0.10: 13.43, 0.05: 15.67, 0.01: 20.04},
+            1: {0.10: 2.71, 0.05: 3.84, 0.01: 6.65},
+        },
+        0: {  # Solo intercetta
+            0: {0.10: 18.17, 0.05: 19.22, 0.01: 25.32},
+            1: {0.10: 7.52, 0.05: 9.16, 0.01: 12.25},
+        },
+        1: {  # Intercetta e trend lineare
+            0: {0.10: 23.15, 0.05: 23.78, 0.01: 30.45},
+            1: {0.10: 10.55, 0.05: 12.39, 0.01: 15.72},
+        },
+    }
 
-    # Compute critical values using the Chi-squared inverse CDF
-    critical_value_trace = chi2.ppf(1 - alpha, dof_trace)
-    critical_value_maxeig = chi2.ppf(1 - alpha, dof_maxeig)
+    # Recupera i valori critici basati su det_order, rank e alpha
+    try:
+        critical_value_trace = johansen_critical_values[det_order][rank][alpha]
+        critical_value_maxeig = johansen_critical_values[det_order][rank][alpha]
+    except KeyError:
+        raise ValueError("Valori critici non disponibili per i parametri specificati.")
 
     return critical_value_trace, critical_value_maxeig
 
-
-# Funzione per creare la matrice delle variabili laggate
-def create_lagged_matrix(data, lags):
-    """Crea le variabili laggate per la rappresentazione VECM."""
-    lagged_data = []
-    for lag in range(1, lags + 1):  # Per ogni lag fino al massimo consentito
-        lagged_data.append(data[lags - lag:-lag])  # Crea la matrice laggata
-    return np.column_stack(lagged_data)  # Combina le colonne in un'unica matrice
-
-
-def jcitest(data, max_lags=1, alpha=0.05):
+def jcitest(data, max_lags=1, alphas=0.05):
     """
-    Esegui il Johansen Cointegration Test simile a quello di MATLAB.
+    Esegui il Johansen Cointegration Test con valori critici personalizzabili.
 
     Args:
-        data (np.ndarray o pd.DataFrame): Le time series (n_obs x n_vars).
+        data (np.ndarray o pd.DataFrame): Dataset delle serie temporali (n_obs x n_vars).
         max_lags (int): Numero massimo di lag inclusi nel modello.
-        alpha (float): Livello di significatività per i valori critici (0.10, 0.05 o 0.01).
+        alphas (tuple): Livelli di significatività da testare (es. (0.10, 0.05, 0.01)).
+        dist_type (str): Tipo di distribuzione per i valori critici ("chi2", "gamma", "skewed_t").
+        kwargs: Parametri addizionali per il calcolo dei valori critici.
 
-    Results:
+    Returns:
         dict: Risultati per ogni assunzione sul trend deterministico (-1, 0, 1).
     """
-    # Controlla se i dati sono in formato Pandas e convertili in array NumPy
+    # Assicura che alphas sia una tupla
+    if isinstance(alphas, (float, int)):  # Se è un singolo numero
+        alphas = (alphas,)
+    # Se i dati sono un DataFrame Pandas o una Serie, convertili in un array NumPy
     if isinstance(data, pd.DataFrame) or isinstance(data, pd.Series):
-        data = data.to_numpy()  # Converte oggetti Pandas in array NumPy
+        data = data.to_numpy()
 
-    # Verifica che i dati siano bidimensionali
+    # Controlla che i dati siano bidimensionali (n_obs x n_vars)
     if data.ndim != 2:
-        raise ValueError("Input data must be bidimensional (n_obs x n_vars).")
+        raise ValueError("Input data must be 2D (n_obs x n_vars).")
 
-    # Ottieni il numero di osservazioni e variabili
+    # Determina il numero di osservazioni (n_obs) e variabili (n_vars) dai dati
     n_obs, n_vars = data.shape
 
-    ## Calcola le differenze prime dei dati
-    #delta_data = np.diff(data, axis=0)  # Differenza prima lungo le righe
-    #Y = delta_data[max_lags:]  # Allinea i dati differenziati per i lag
-    #X_lag = create_lagged_matrix(delta_data, max_lags)  # Crea le variabili laggate
-    #Z_lag = data[max_lags:-1]  # Crea la matrice dei lag
+    # Funzione interna per creare una matrice laggata
+    def create_lagged_matrix(data, lags):
+        """
+        Crea una matrice laggata concatenando i lag specificati.
 
-    ## Mappa dei valori critici per diversi livelli di significatività
-    #critical_values_map = {
-    #    0.10: [10.49, 2.71],  # Valori critici al 90%
-    #    0.05: [12.32, 4.13],  # Valori critici al 95%
-    #    0.01: [16.36, 6.94],  # Valori critici al 99%
-    #}
+        Args:
+            data (np.ndarray): Dati delle serie temporali.
+            lags (int): Numero di lag.
 
-    # Controlla se il valore di alpha è valido
-    if alpha not in [0.10, 0.05, 0.01]:
-        raise ValueError("Alpha value not valid. Use 0.10, 0.05 or 0.01.")
+        Returns:
+            np.ndarray: Matrice laggata.
+        """
+        # Costruisce la matrice laggata concatenando le colonne corrispondenti ai lag
+        return np.column_stack([data[i:-(lags - i) or None] for i in range(lags)])
 
-    ## Seleziona i valori critici appropriati in base ad alpha
-    #critical_values = critical_values_map[alpha]
+    # Calcola le differenze prime dei dati per ottenere la serie stazionaria
+    delta_data = np.diff(data, axis=0)
 
-    # Dizionario per salvare i risultati
+    # Inizializza un dizionario per salvare i risultati
     results = {}
 
-    ## Ciclo su tutte le assunzioni sul trend deterministico
-    #for det_order in [-1, 0, 1]:
-    #    # Creazione delle componenti deterministiche
-    #    if det_order == -1:
-    #        X = X_lag  # Nessun intercetta o trend
-    #    elif det_order == 0:
-    #        X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])  # Solo intercetta
-    #    elif det_order == 1:
-    #        trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)  # Crea il trend lineare
-    #        X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])  # Intercetta e trend
-#
-    #    # Esegui la regressione di Y su X e calcola i residui
-    #    beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
-    #    residuals_Y = Y - X @ beta_X  # Residui di Y su X
-#
-    #    # Esegui la regressione di Z su X e calcola i residui
-    #    beta_Z = np.linalg.lstsq(X, Z_lag, rcond=None)[0]
-    #    residuals_Z = Z_lag - X @ beta_Z
-
-    # Ciclo sulle assunzioni del trend deterministico
+    # Itera sulle assunzioni del trend deterministico (-1, 0, 1)
     for det_order in [-1, 0, 1]:
-        # Creazione delle componenti deterministiche
+        #print(f"Processing deterministic trend assumption: det_order={det_order}")
+
+        # Crea la matrice laggata dalle differenze prime
+        X_lag = create_lagged_matrix(delta_data, max_lags)
+
+        # Aggiunge componenti deterministiche basate su det_order
         if det_order == -1:
-            # Nessun intercetta o trend: usa solo le variabili laggate
-            X = create_lagged_matrix(np.diff(data, axis=0), max_lags) # Crea la matrice delle variabili laggate
+            X = X_lag  # Nessuna intercetta o trend
         elif det_order == 0:
-            # Solo intercetta: aggiungi una colonna di 1
-            X = np.hstack([create_lagged_matrix(np.diff(data, axis=0), max_lags),
-                           np.ones((data.shape[0] - max_lags, 1))])
-        elif det_order == 1:
-            # Intercetta e trend: aggiungi una colonna di 1 e un trend lineare
-            trend = np.arange(1, data.shape[0] - max_lags + 1).reshape(-1, 1)
-            X = np.hstack([create_lagged_matrix(np.diff(data, axis=0), max_lags),
-                           np.ones((data.shape[0] - max_lags, 1)), trend])
+            # Aggiunge una colonna di 1 per rappresentare l'intercetta
+            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])
+        else:
+            # Aggiunge sia l'intercetta che un trend lineare
+            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)
+            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])
 
-        # Calcola le differenze prime di Y e allinea con i lag
-        delta_data = np.diff(data, axis=0)  # Differenze prime
-        Y = delta_data[max_lags:]  # Allinea Y per il numero di lag
+        # Allinea i dati differenziati con la matrice laggata
+        Y = delta_data[max_lags:]  # Rimuove i primi max_lags osservazioni per allineamento
 
-        # Regressione di Y sulle variabili laggate
+        # Esegue una regressione di Y su X per ottenere i residui di Y
         beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
-        residuals_Y = Y - X @ beta_X  # Residui di Y
+        residuals_Y = Y - X @ beta_X  # Residui di Y calcolati come Y - Xβ
 
-        # Regressione di Z (livelli originali) sulle variabili laggate
-        Z = data[max_lags:-1]
+        # Allinea i livelli originali (Z) con le variabili laggate
+        Z = data[max_lags:max_lags + X.shape[0]]  # Rimuove osservazioni iniziali
+        # Esegue una regressione di Z su X per ottenere i residui di Z
         beta_Z = np.linalg.lstsq(X, Z, rcond=None)[0]  # Coefficienti della regressione
-        residuals_Z = Z - X @ beta_Z  # Residui di Z
+        residuals_Z = Z - X @ beta_Z  # Residui di Z calcolati come Z - Xβ
 
-        # Calcola le matrici di covarianza
-        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui YY
-        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza dei residui ZZ
-        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza dei residui YZ
-        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui ZY
+        # Calcola le matrici di covarianza usando i residui
+        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza di Y
+        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza di Z
+        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza incrociata Y-Z
+        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza incrociata Z-Y
 
-        # Calcola la matrice degli autovalori
+        # Costruisce la matrice per calcolare autovalori e autovettori
         eig_matrix = inv(S00) @ S01 @ inv(S11) @ S10
-        eigenvalues, eigenvectors = eig(eig_matrix)  # Autovalori e autovettori
-        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo gli autovalori reali positivi
+        eigenvalues, eigenvectors = eig(eig_matrix)  # Calcola autovalori e autovettori
+        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo autovalori reali positivi
 
         # Calcola le statistiche trace e max eigenvalue
         n_obs_eff = n_obs - max_lags  # Numero effettivo di osservazioni
         trace_stats = -n_obs_eff * np.cumsum(np.log(1 - eigenvalues[::-1]))[::-1]  # Statistica trace
         max_eigen_stats = -n_obs_eff * np.log(1 - eigenvalues)  # Statistica max eigenvalue
 
-        # Funzione per calcolare i p-value usando la distribuzione Chi-quadro
-        def p_value_chi2(stat, dof):
-            return 1 - chi2.cdf(stat, dof)
+        # Inizializza un dizionario per salvare i risultati per ogni livello di significatività
+        results[f"det_order_{det_order}"] = {}
 
-        # Calcola i p-value per le statistiche trace e max eigenvalue
-        trace_p_values = [p_value_chi2(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
-        max_eigen_p_values = [p_value_chi2(stat, 1) for stat in max_eigen_stats]
+        # Itera su ogni livello di significatività fornito
+        for alpha in alphas:
+            #print(f"Testing significance level: alpha={alpha}")
 
-        # Calcola dinamicamente i valori critici per trace e max eigenvalue
-        trace_critical_values = []
-        maxeig_critical_values = []
-        for r in range(len(eigenvalues)):
-            crit_trace, crit_maxeig = compute_critical_values(n_vars, r + 1, alpha)
-            trace_critical_values.append(crit_trace)
-            maxeig_critical_values.append(crit_maxeig)
+            # Calcola i valori critici basati sulle tabelle di Johansen
+            trace_critical_values, _ = zip(
+                *[compute_critical_values(r, alpha, det_order) for r in range(len(eigenvalues))]
+            )
 
-        ## Determina il rango basato sui valori critici
-        #rank_trace = sum(stat > critical_values[0] for stat in trace_stats)  # Rango per trace
-        #rank_maxeig = sum(stat > critical_values[1] for stat in max_eigen_stats)  # Rango per max eigenvalue
+            # Calcola i p-value per le statistiche trace e max eigenvalue
+            trace_p_values = [1 - chi2.cdf(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
+            _ = [1 - chi2.cdf(stat, 1) for stat in max_eigen_stats]
 
-        # Determina le ipotesi per trace e max eigenvalue
-        trace_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(trace_stats, trace_critical_values)]
-        maxeig_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(max_eigen_stats, maxeig_critical_values)]
+            # Determina il rango basato sulle statistiche trace
+            rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
 
-        # Determina il rango basato sulle statistiche trace
-        rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
+            # Crea una tabella formattata per visualizzare i risultati
+            results_table = "\n".join([
+                f"Deterministic trend assumption: {det_order}",
+                f"Significance level: {alpha:.2f}",
+                "r | h  |  stat    | cValue   | pValue  | eigVal",
+                "-" * 60,
+                *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
+                  for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
+                f"\nRank: {rank_trace}",
+                "=" * 60
+            ])
 
-        # Crea una tabella dei risultati formattata
-        results_table = "\n".join([
-            f"Assunzione sul Trend Deterministico: {det_order}",
-            f"Livello di Significatività: {alpha:.2f}",
-            "r | h  |  stat    | cValue   | pValue  | eigVal",
-            "-" * 60,
-            *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
-              for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
-            f"\nRank: {rank_trace}",
-            "=" * 60
-        ])
+            # Salva i risultati per questo livello di significatività
+            results[f"det_order_{det_order}"][f"alpha_{alpha:.2f}"] = {
+                "eigenvalues": eigenvalues,  # Autovalori calcolati
+                "trace_stats": trace_stats,  # Statistiche trace
+                "trace_critical_values": trace_critical_values,  # Valori critici per trace
+                "trace_p_values": trace_p_values,  # P-value per le statistiche trace
+                "rank_trace": rank_trace,  # Rango stimato
+                "results_table": results_table,  # Tabella formattata
+            }
 
-        # Salva i risultati per questa assunzione di det_order
-        results[f"det_order_{det_order}"] = {
-            "eigenvalues": eigenvalues,  # Autovalori
-            "eigenvectors": eigenvectors,  # Autovettori
-            "trace_stats": trace_stats,  # Statistiche trace
-            "trace_p_values": trace_p_values,  # P-value trace
-            "max_eigen_stats": max_eigen_stats,  # Statistiche max eigenvalue
-            "max_eigen_p_values": max_eigen_p_values,  # P-value max eigenvalue
-            "trace_critical_values": trace_critical_values,  # Valori critici trace
-            "maxeig_critical_values": maxeig_critical_values,  # Valori critici max eigenvalue
-            "trace_hypotheses": trace_hypotheses,  # Ipotesi trace
-            "maxeig_hypotheses": maxeig_hypotheses,  # Ipotesi max eigenvalue
-            "rank_trace": rank_trace,  # Rango basato sulle statistiche trace
-            "results_table": results_table,  # Tabella dei risultati formattata
-        }
+    if isinstance(results, dict):  # Ensure `results` is a dictionary
+        for det_order, alpha_results in results.items():
+            #print(f"Processing det_order: {det_order}")
+            if isinstance(alpha_results, dict):  # Ensure `alpha_results` is a dictionary
+                for alpha, details in alpha_results.items():
+                    #print(f"Processing alpha: {alpha}")
+                    if "results_table" in details:  # Ensure key exists
+                        print(details["results_table"])
+                    else:
+                        print(f"Missing 'results_table' in details: {details}")
+            else:
+                print(f"Unexpected type for alpha_results: {type(alpha_results)}")
+    else:
+        print(f"Unexpected type for results: {type(results)}")
 
+    # Ritorna il dizionario dei risultati
     return results
 
-        ## Crea una tabella dei risultati formattata
-        #results_table = "\n".join([
-        #    f"Deterministic Trend Assumption: {det_order}",
-        #    f"Significance Level: {alpha:.2f}",
-        #    "r | h  |  stat    | cValue   | pValue  | eigVal",
-        #    "-" * 60,
-        #    *(f"{i} | {stat > critical_values[0]} | {stat:.4f} | {critical_values[0]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
-        #      for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
-        #    f"\nRank: {rank_trace}",
-        #    #f"Rango MaxEig: {rank_maxeig}\n",
-        #    "=" * 60
-        #])
+
+#    # Controlla se i dati sono in formato Pandas e convertili in array NumPy
+#    if isinstance(data, pd.DataFrame) or isinstance(data, pd.Series):
+#        data = data.to_numpy()  # Converte oggetti Pandas in array NumPy
 #
-        ## Salva i risultati per il det_order corrente
-        #results[f"det_order_{det_order}"] = {
-        #    "eigenvalues": eigenvalues,
-        #    "eigenvectors": eigenvectors,
-        #    "trace_stats": trace_stats,
-        #    "trace_p_values": trace_p_values,
-        #    "max_eigen_stats": max_eigen_stats,
-        #    "max_eigen_p_values": max_eigen_p_values,
-        #    "critical_values": critical_values,
-        #    "rank_trace": rank_trace,
-        #    "rank_maxeig": rank_maxeig,
-        #    "results_table": results_table
-        #}
+#    # Verifica che i dati siano bidimensionali
+#    if data.ndim != 2:
+#        raise ValueError("Input data must be bidimensional (n_obs x n_vars).")
+#
+#    # Ottieni il numero di osservazioni e variabili
+#    n_obs, n_vars = data.shape
+#
+#    # Calcola le differenze prime dei dati
+#    delta_data = np.diff(data, axis=0)  # Differenza prima lungo le righe
+#    Y = delta_data[max_lags:]  # Allinea i dati differenziati per i lag
+#    X_lag = create_lagged_matrix(delta_data, max_lags)  # Crea le variabili laggate
+#    Z_lag = data[max_lags:-1]  # Crea la matrice dei lag
+#
+#    ## Mappa dei valori critici per diversi livelli di significatività
+#    #critical_values_map = {
+#    #    0.10: [10.49, 2.71],  # Valori critici al 90%
+#    #    0.05: [12.32, 4.13],  # Valori critici al 95%
+#    #    0.01: [16.36, 6.94],  # Valori critici al 99%
+#    #}
+#
+#    # Controlla se il valore di alpha è valido
+#    if alpha not in [0.10, 0.05, 0.01]:
+#        raise ValueError("Alpha value not valid. Use 0.10, 0.05 or 0.01.")
+#
+#    ## Seleziona i valori critici appropriati in base ad alpha
+#    #critical_values = critical_values_map[alpha]
+#
+#    # Dizionario per salvare i risultati
+#    results = {}
+#
+#    # Ciclo su tutte le assunzioni sul trend deterministico
+#    for det_order in [-1, 0, 1]:
+#        # Creazione delle componenti deterministiche
+#        if det_order == -1:
+#            X = X_lag  # Nessun intercetta o trend
+#        elif det_order == 0:
+#            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])  # Solo intercetta
+#        elif det_order == 1:
+#            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)  # Crea il trend lineare
+#            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])  # Intercetta e trend
+#
+#        # Esegui la regressione di Y su X e calcola i residui
+#        beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
+#        residuals_Y = Y - X @ beta_X  # Residui di Y su X
+#
+#        # Esegui la regressione di Z su X e calcola i residui
+#        beta_Z = np.linalg.lstsq(X, Z_lag, rcond=None)[0]
+#        residuals_Z = Z_lag - X @ beta_Z
+#
+#        # Calcola le matrici di covarianza
+#        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui YY
+#        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza dei residui ZZ
+#        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza dei residui YZ
+#        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui ZY
+#
+#        # Calcola la matrice degli autovalori
+#        eig_matrix = inv(S00) @ S01 @ inv(S11) @ S10
+#        eigenvalues, eigenvectors = eig(eig_matrix)  # Autovalori e autovettori
+#        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo gli autovalori reali positivi
+#
+#        # Calcola le statistiche trace e max eigenvalue
+#        n_obs_eff = n_obs - max_lags  # Numero effettivo di osservazioni
+#        trace_stats = -n_obs_eff * np.cumsum(np.log(1 - eigenvalues[::-1]))[::-1]  # Statistica trace
+#        max_eigen_stats = -n_obs_eff * np.log(1 - eigenvalues)  # Statistica max eigenvalue
+#
+#        # Funzione per calcolare i p-value usando la distribuzione Chi-quadro
+#        def p_value_chi2(stat, dof):
+#            return 1 - chi2.cdf(stat, dof)
+#
+#        # Calcola i p-value per le statistiche trace e max eigenvalue
+#        trace_p_values = [p_value_chi2(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
+#        max_eigen_p_values = [p_value_chi2(stat, 1) for stat in max_eigen_stats]
+#
+#        # Calcola dinamicamente i valori critici per trace e max eigenvalue
+#        trace_critical_values = []
+#        maxeig_critical_values = []
+#        for r in range(len(eigenvalues)):
+#            crit_trace, crit_maxeig = compute_critical_values(n_vars, r + 1, alpha)
+#            trace_critical_values.append(crit_trace)
+#            maxeig_critical_values.append(crit_maxeig)
+#
+#        # Determina le ipotesi per trace e max eigenvalue
+#        trace_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(trace_stats, trace_critical_values)]
+#        maxeig_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(max_eigen_stats, maxeig_critical_values)]
+#
+#        # Determina il rango basato sulle statistiche trace
+#        rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
+#
+#        # Crea una tabella dei risultati formattata
+#        results_table = "\n".join([
+#            f"Assunzione sul Trend Deterministico: {det_order}",
+#            f"Livello di Significatività: {alpha:.2f}",
+#            "r | h  |  stat    | cValue   | pValue  | eigVal",
+#            "-" * 60,
+#            *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
+#              for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
+#            f"\nRank: {rank_trace}",
+#            "=" * 60
+#        ])
+#
+#        # Salva i risultati per questa assunzione di det_order
+#        results[f"det_order_{det_order}"] = {
+#            "eigenvalues": eigenvalues,  # Autovalori
+#            "eigenvectors": eigenvectors,  # Autovettori
+#            "trace_stats": trace_stats,  # Statistiche trace
+#            "trace_p_values": trace_p_values,  # P-value trace
+#            "max_eigen_stats": max_eigen_stats,  # Statistiche max eigenvalue
+#            "max_eigen_p_values": max_eigen_p_values,  # P-value max eigenvalue
+#            "trace_critical_values": trace_critical_values,  # Valori critici trace
+#            "maxeig_critical_values": maxeig_critical_values,  # Valori critici max eigenvalue
+#            "trace_hypotheses": trace_hypotheses,  # Ipotesi trace
+#            "maxeig_hypotheses": maxeig_hypotheses,  # Ipotesi max eigenvalue
+#            "rank_trace": rank_trace,  # Rango basato sulle statistiche trace
+#            "results_table": results_table,  # Tabella dei risultati formattata
+#        }
+#
+#    return results
 
-    return results
 
+def print_jcitest_results(results):
+    """
+    Prints the Johansen Cointegration Test results in a tabular format.
+
+    Parameters:
+        results (dict): The results from the `jcitest` function.
+    """
+    for det_order, result in results.items():
+        print(f"Deterministic Trend Assumption: {det_order}")
+        print(f"{'-' * 60}")
+        
+        table_data = []
+        headers = ["r", "h", "Trace Stat", "Critical Value", "p-Value", "Eigenvalue"]
+        
+        for i, (trace_stat, crit_value, p_value, eigenvalue) in enumerate(
+            zip(result["trace_stats"], result["trace_critical_values"], 
+                result["trace_p_values"], result["eigenvalues"])
+        ):
+            h = "True" if trace_stat > crit_value else "False"
+            table_data.append([i, h, f"{trace_stat:.4f}", f"{crit_value:.4f}", f"{p_value:.4f}", f"{eigenvalue:.4f}"])
+        
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+        print(f"Rank (r): {result['rank_trace']}")
+        print(f"{'=' * 60}\n")
 
 
 
