@@ -369,92 +369,99 @@ def ljung_box_test(order, results_dict, lags=24):
 
 def jcitest(data, model='H1', lags=0, test='trace', alpha=0.05, display='summary', data_variables=None):
     """
-    Esegue il Johansen Cointegration Test (traduzione Python di MATLAB 'jcitest').
-
+    Esegue il test di cointegrazione di Johansen.
+    
     Parametri:
-    - data: numpy.ndarray, pandas.DataFrame, o pandas.Series
-    - model: tipo di modello VECM ('H2', 'H1*', 'H1', 'H*', 'H')
-    - lags: numero di lag da includere
-    - test: tipo di test ('trace', 'maxeig')
-    - alpha: livello di significatività
-    - display: livello di output ('off', 'summary', 'params', 'full')
-    - data_variables: nomi delle colonne per selezionare variabili in DataFrame
-
-    Ritorna:
-    - results: dict contenente i risultati del test, p-value, statistiche, valori critici e MLE
+    - data: array numpy, DataFrame pandas o Series pandas contenente i dati temporali
+    - model: stringa, tipo di modello VECM ('H2', 'H1*', 'H1', 'H*', 'H')
+    - lags: intero, numero di ritardi
+    - test: stringa, tipo di test ('trace', 'maxeig')
+    - alpha: float, livello di significatività
+    - display: stringa, livello di dettaglio dell'output ('off', 'summary', 'params', 'full')
+    - data_variables: lista, nomi delle colonne da selezionare in un DataFrame
+    
+    Restituisce:
+    - results: dizionario con risultati del test (statistiche, p-value, valori critici, autovalori, ecc.)
     """
 
-    # Verifica che i dati siano in uno dei formati accettati
+    # Verifica che i dati siano in un formato valido
     if not isinstance(data, (np.ndarray, pd.DataFrame, pd.Series)):
-        raise ValueError("I dati devono essere numpy array, pandas DataFrame, o pandas Series.")
+        raise ValueError("I dati devono essere un array numpy, DataFrame pandas o Series pandas.")
     
-    # Se i dati sono un DataFrame e specificati data_variables, seleziona le colonne
+    # Se i dati sono un DataFrame e sono specificate colonne, seleziona quelle
     if isinstance(data, pd.DataFrame) and data_variables:
         data = data[data_variables].to_numpy()
     elif isinstance(data, (pd.DataFrame, pd.Series)):
         data = data.to_numpy()
     
-    # Converte i dati in array numpy
+    # Converte i dati in array numpy (se non lo sono già)
     data = np.asarray(data, dtype=float)
-    # Controlla che i dati abbiano almeno due colonne
+    
+    # Verifica che i dati abbiano almeno due colonne
     if data.ndim != 2 or data.shape[1] < 2:
-        raise ValueError("I dati devono essere un array 2D con almeno due colonne.")
+        raise ValueError("I dati devono essere una matrice 2D con almeno due colonne.")
     
     # Rimuove righe con valori mancanti
     data = data[~np.isnan(data).any(axis=1)]
-    num_obs, num_dims = data.shape  # Ottiene il numero di osservazioni e dimensioni
+    num_obs, num_dims = data.shape  # Ottieni il numero di osservazioni e di dimensioni
 
-    # Verifica che il numero di lag e alpha siano validi
+    # Verifica che il numero di ritardi e alpha siano validi
     if not isinstance(lags, int) or lags < 0:
-        raise ValueError("I lag devono essere un intero non negativo.")
+        raise ValueError("I ritardi devono essere un intero non negativo.")
     if not 0 < alpha < 1:
         raise ValueError("Alpha deve essere compreso tra 0 e 1.")
 
-    # Carica valori critici e livelli di significatività (qui è un esempio casuale)
-    sig_levels = np.linspace(0.001, 0.999, 100)  # Livelli di significatività
-    max_dims = 12  # Massimo numero di dimensioni accettate
-    critical_values = np.random.rand(max_dims, len(sig_levels))  # Placeholder per i valori critici
+    # Simula i livelli di significatività e i valori critici (placeholder)
+    sig_levels = np.linspace(0.001, 0.999, 100)  # Livelli di significatività predefiniti
+    max_dims = 12  # Numero massimo di dimensioni per i valori critici
+    critical_values = np.random.rand(max_dims, len(sig_levels))  # Placeholder per valori critici reali
 
-    # Verifica che il numero di dimensioni non superi i valori tabulati
+    # Se il numero di dimensioni supera il massimo tabulato, solleva un errore
     if num_dims > max_dims:
-        raise ValueError(f"Il numero di dimensioni ({num_dims}) supera i valori tabulati ({max_dims}).")
+        raise ValueError(f"Il numero di dimensioni ({num_dims}) supera i valori critici tabulati ({max_dims}).")
     
-    # Funzione per creare la matrice di lag
+    # Funzione per creare una matrice con ritardi
     def lag_matrix(X, lag):
-        """Crea una matrice di lag per un dato numero di lag."""
+        """Crea una matrice di ritardi per un dato lag."""
         return np.hstack([np.roll(X, -i, axis=0) for i in range(lag + 1)])[lag:]
 
-    # Crea le matrici lag necessarie
+    # Crea la matrice con i ritardi
     Y_lags = lag_matrix(data, lags + 1)
-    DY = Y_lags[:, :num_dims] - Y_lags[:, num_dims:2*num_dims]  # Differenze prime
-    LY = Y_lags[:, num_dims:2*num_dims]  # Valori ritardati di Y
-    DLY = Y_lags[:, 2*num_dims:]  # Valori ritardati differenziati
+    DY = Y_lags[:, :num_dims] - Y_lags[:, num_dims:2*num_dims]  # Differenze
+    LY = Y_lags[:, num_dims:2*num_dims]  # Valori ritardati
+    DLY = Y_lags[:, 2*num_dims:]  # Ritardi multipli delle differenze
 
-    # Imposta i residui in base al modello
+    # Configura i modelli basati sui parametri specificati
     if model == 'H2':
-        R0 = DY
-        R1 = LY
-        Z2 = DLY
+        Z0, Z1, Z2 = DY, LY, DLY
+    elif model == 'H1*':
+        Z0, Z1, Z2 = DY, np.hstack([LY, np.ones((LY.shape[0], 1))]), DLY
+    elif model == 'H1':
+        Z0, Z1, Z2 = DY, LY, np.hstack([DLY, np.ones((DLY.shape[0], 1))])
+    elif model == 'H*':
+        Z0, Z1, Z2 = DY, np.hstack([LY, np.arange(1, LY.shape[0] + 1).reshape(-1, 1)]), np.hstack([DLY, np.ones((DLY.shape[0], 1))])
+    elif model == 'H':
+        Z0, Z1, Z2 = DY, LY, np.hstack([DLY, np.ones((DLY.shape[0], 1)), np.arange(1, DLY.shape[0] + 1).reshape(-1, 1)])
     else:
-        raise NotImplementedError("Solo il modello 'H2' è implementato in questa versione semplificata.")
+        raise ValueError(f"Modello '{model}' non supportato.")
 
-    # Calcola i residui centrati
-    R0 = R0 - Z2 @ np.linalg.lstsq(Z2, R0, rcond=None)[0]
-    R1 = R1 - Z2 @ np.linalg.lstsq(Z2, R1, rcond=None)[0]
-    S00 = R0.T @ R0 / num_obs  # Matrice delle covarianze dei residui
-    S01 = R0.T @ R1 / num_obs  # Covarianze incrociate
-    S11 = R1.T @ R1 / num_obs  # Covarianze dei ritardi
+    # Calcolo dei residui
+    R0 = Z0 - Z2 @ np.linalg.lstsq(Z2, Z0, rcond=None)[0]
+    R1 = Z1 - Z2 @ np.linalg.lstsq(Z2, Z1, rcond=None)[0]
+    S00 = R0.T @ R0 / num_obs  # Matrice delle covarianze
+    S01 = R0.T @ R1 / num_obs
+    S11 = R1.T @ R1 / num_obs
 
     # Decomposizione agli autovalori
     eigvals, eigvecs = eig(S01 @ np.linalg.inv(S00) @ S01.T, S11)
-    eigvals = np.sort(np.real(eigvals))[::-1]  # Ordina autovalori in ordine decrescente
-    eigvecs = eigvecs[:, np.argsort(np.real(eigvals))[::-1]]  # Autovettori corrispondenti
+    eigvals = np.sort(np.real(eigvals))[::-1]  # Ordina gli autovalori in ordine decrescente
+    eigvecs = eigvecs[:, np.argsort(np.real(eigvals))[::-1]]  # Riorganizza gli autovettori
 
     # Calcolo delle statistiche del test
-    log_lambda = np.log(1 - eigvals)  # Logaritmo delle differenze dagli autovalori
+    log_lambda = np.log(1 - eigvals)  # Logaritmo di (1 - autovalore)
     test_stats = -num_obs * np.cumsum(log_lambda[::-1])[::-1] if test == 'trace' else -num_obs * log_lambda
 
-    # Interpolazione dei valori critici e calcolo dei p-value
+    # Calcolo dei p-value tramite interpolazione
     p_values = [interp1d(critical_values[d, :], sig_levels, kind='linear', bounds_error=False, fill_value="extrapolate")(test_stats[d]) for d in range(num_dims)]
 
     # Crea il dizionario dei risultati
@@ -467,15 +474,17 @@ def jcitest(data, model='H1', lags=0, test='trace', alpha=0.05, display='summary
         'lags': lags
     }
 
-    # Visualizzazione dei risultati
+    # Mostra i risultati se richiesto
     if display in ['summary', 'full']:
-        print(f"\nJohansen Cointegration Test Results (Model: {model}, Lag: {lags}, Alpha: {alpha})")
+        print(f"\nRisultati del Test di Cointegrazione di Johansen (Modello: {model}, Ritardi: {lags}, Alpha: {alpha})")
         print("=============================================")
         print(f"{'Rank':<5}{'Stat':<10}{'Crit Val':<10}{'P-Value':<10}")
         for r, stat in enumerate(test_stats):
             print(f"{r:<5}{stat:<10.4f}{results['critical_values'][r]:<10.4f}{p_values[r]:<10.4f}")
 
     return results
+
+
 #def compute_critical_values(rank, alpha, det_order):
 #    """
 #    Calcola i valori critici per il test di Johansen basati su tabelle predefinite.
