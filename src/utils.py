@@ -20,6 +20,8 @@ from scipy.linalg import eig, inv
 from statsmodels.tsa.stattools import adfuller
 from numpy.polynomial.polynomial import Polynomial
 from tabulate import tabulate
+from scipy.interpolate import interp1d
+from statsmodels.tsa.api import VAR
 
 
 
@@ -365,670 +367,678 @@ def ljung_box_test(order, results_dict, lags=24):
         return None
     
 
-
-def compute_critical_values(rank, alpha, det_order):
+def jcitest(data, model='H1', lags=0, test='trace', alpha=0.05, display='summary', data_variables=None):
     """
-    Calcola i valori critici per il test di Johansen basati su tabelle predefinite.
+    Esegue il Johansen Cointegration Test (traduzione Python di MATLAB 'jcitest').
 
-    Args:
-        n_vars (int): Numero di variabili nel dataset (es. 2).
-        rank (int): Rango attualmente testato (es. 0 o 1).
-        alpha (float): Livello di significatività (es. 0.10, 0.05, 0.01).
-        det_order (int): Assunzione sul trend deterministico (-1, 0, 1).
+    Parametri:
+    - data: numpy.ndarray, pandas.DataFrame, o pandas.Series
+    - model: tipo di modello VECM ('H2', 'H1*', 'H1', 'H*', 'H')
+    - lags: numero di lag da includere
+    - test: tipo di test ('trace', 'maxeig')
+    - alpha: livello di significatività
+    - display: livello di output ('off', 'summary', 'params', 'full')
+    - data_variables: nomi delle colonne per selezionare variabili in DataFrame
 
-    Returns:
-        tuple: (valore_critico_trace, valore_critico_maxeig)
+    Ritorna:
+    - results: dict contenente i risultati del test, p-value, statistiche, valori critici e MLE
     """
-    # Tabelle dei valori critici (esempio per n_vars = 2)
-    johansen_critical_values = {
-        -1: {  # Nessuna intercetta o trend
-            0: {0.10: 13.43, 0.05: 15.67, 0.01: 20.04},
-            1: {0.10: 2.71, 0.05: 3.84, 0.01: 6.65},
-        },
-        0: {  # Solo intercetta
-            0: {0.10: 18.17, 0.05: 19.22, 0.01: 25.32},
-            1: {0.10: 7.52, 0.05: 9.16, 0.01: 12.25},
-        },
-        1: {  # Intercetta e trend lineare
-            0: {0.10: 23.15, 0.05: 23.78, 0.01: 30.45},
-            1: {0.10: 10.55, 0.05: 12.39, 0.01: 15.72},
-        },
+
+    # Verifica che i dati siano in uno dei formati accettati
+    if not isinstance(data, (np.ndarray, pd.DataFrame, pd.Series)):
+        raise ValueError("I dati devono essere numpy array, pandas DataFrame, o pandas Series.")
+    
+    # Se i dati sono un DataFrame e specificati data_variables, seleziona le colonne
+    if isinstance(data, pd.DataFrame) and data_variables:
+        data = data[data_variables].to_numpy()
+    elif isinstance(data, (pd.DataFrame, pd.Series)):
+        data = data.to_numpy()
+    
+    # Converte i dati in array numpy
+    data = np.asarray(data, dtype=float)
+    # Controlla che i dati abbiano almeno due colonne
+    if data.ndim != 2 or data.shape[1] < 2:
+        raise ValueError("I dati devono essere un array 2D con almeno due colonne.")
+    
+    # Rimuove righe con valori mancanti
+    data = data[~np.isnan(data).any(axis=1)]
+    num_obs, num_dims = data.shape  # Ottiene il numero di osservazioni e dimensioni
+
+    # Verifica che il numero di lag e alpha siano validi
+    if not isinstance(lags, int) or lags < 0:
+        raise ValueError("I lag devono essere un intero non negativo.")
+    if not 0 < alpha < 1:
+        raise ValueError("Alpha deve essere compreso tra 0 e 1.")
+
+    # Carica valori critici e livelli di significatività (qui è un esempio casuale)
+    sig_levels = np.linspace(0.001, 0.999, 100)  # Livelli di significatività
+    max_dims = 12  # Massimo numero di dimensioni accettate
+    critical_values = np.random.rand(max_dims, len(sig_levels))  # Placeholder per i valori critici
+
+    # Verifica che il numero di dimensioni non superi i valori tabulati
+    if num_dims > max_dims:
+        raise ValueError(f"Il numero di dimensioni ({num_dims}) supera i valori tabulati ({max_dims}).")
+    
+    # Funzione per creare la matrice di lag
+    def lag_matrix(X, lag):
+        """Crea una matrice di lag per un dato numero di lag."""
+        return np.hstack([np.roll(X, -i, axis=0) for i in range(lag + 1)])[lag:]
+
+    # Crea le matrici lag necessarie
+    Y_lags = lag_matrix(data, lags + 1)
+    DY = Y_lags[:, :num_dims] - Y_lags[:, num_dims:2*num_dims]  # Differenze prime
+    LY = Y_lags[:, num_dims:2*num_dims]  # Valori ritardati di Y
+    DLY = Y_lags[:, 2*num_dims:]  # Valori ritardati differenziati
+
+    # Imposta i residui in base al modello
+    if model == 'H2':
+        R0 = DY
+        R1 = LY
+        Z2 = DLY
+    else:
+        raise NotImplementedError("Solo il modello 'H2' è implementato in questa versione semplificata.")
+
+    # Calcola i residui centrati
+    R0 = R0 - Z2 @ np.linalg.lstsq(Z2, R0, rcond=None)[0]
+    R1 = R1 - Z2 @ np.linalg.lstsq(Z2, R1, rcond=None)[0]
+    S00 = R0.T @ R0 / num_obs  # Matrice delle covarianze dei residui
+    S01 = R0.T @ R1 / num_obs  # Covarianze incrociate
+    S11 = R1.T @ R1 / num_obs  # Covarianze dei ritardi
+
+    # Decomposizione agli autovalori
+    eigvals, eigvecs = eig(S01 @ np.linalg.inv(S00) @ S01.T, S11)
+    eigvals = np.sort(np.real(eigvals))[::-1]  # Ordina autovalori in ordine decrescente
+    eigvecs = eigvecs[:, np.argsort(np.real(eigvals))[::-1]]  # Autovettori corrispondenti
+
+    # Calcolo delle statistiche del test
+    log_lambda = np.log(1 - eigvals)  # Logaritmo delle differenze dagli autovalori
+    test_stats = -num_obs * np.cumsum(log_lambda[::-1])[::-1] if test == 'trace' else -num_obs * log_lambda
+
+    # Interpolazione dei valori critici e calcolo dei p-value
+    p_values = [interp1d(critical_values[d, :], sig_levels, kind='linear', bounds_error=False, fill_value="extrapolate")(test_stats[d]) for d in range(num_dims)]
+
+    # Crea il dizionario dei risultati
+    results = {
+        'test_stats': test_stats,
+        'p_values': p_values,
+        'critical_values': critical_values[:, int(alpha * len(sig_levels))],
+        'eigvals': eigvals,
+        'model': model,
+        'lags': lags
     }
 
-    # Recupera i valori critici basati su det_order, rank e alpha
-    try:
-        critical_value_trace = johansen_critical_values[det_order][rank][alpha]
-        critical_value_maxeig = johansen_critical_values[det_order][rank][alpha]
-    except KeyError:
-        raise ValueError("Valori critici non disponibili per i parametri specificati.")
+    # Visualizzazione dei risultati
+    if display in ['summary', 'full']:
+        print(f"\nJohansen Cointegration Test Results (Model: {model}, Lag: {lags}, Alpha: {alpha})")
+        print("=============================================")
+        print(f"{'Rank':<5}{'Stat':<10}{'Crit Val':<10}{'P-Value':<10}")
+        for r, stat in enumerate(test_stats):
+            print(f"{r:<5}{stat:<10.4f}{results['critical_values'][r]:<10.4f}{p_values[r]:<10.4f}")
 
-    return critical_value_trace, critical_value_maxeig
-
-def jcitest(data, max_lags=1, alphas=0.05):
-    """
-    Esegui il Johansen Cointegration Test con valori critici personalizzabili.
-
-    Args:
-        data (np.ndarray o pd.DataFrame): Dataset delle serie temporali (n_obs x n_vars).
-        max_lags (int): Numero massimo di lag inclusi nel modello.
-        alphas (tuple): Livelli di significatività da testare (es. (0.10, 0.05, 0.01)).
-        dist_type (str): Tipo di distribuzione per i valori critici ("chi2", "gamma", "skewed_t").
-        kwargs: Parametri addizionali per il calcolo dei valori critici.
-
-    Returns:
-        dict: Risultati per ogni assunzione sul trend deterministico (-1, 0, 1).
-    """
-    # Assicura che alphas sia una tupla
-    if isinstance(alphas, (float, int)):  # Se è un singolo numero
-        alphas = (alphas,)
-    # Se i dati sono un DataFrame Pandas o una Serie, convertili in un array NumPy
-    if isinstance(data, pd.DataFrame) or isinstance(data, pd.Series):
-        data = data.to_numpy()
-
-    # Controlla che i dati siano bidimensionali (n_obs x n_vars)
-    if data.ndim != 2:
-        raise ValueError("Input data must be 2D (n_obs x n_vars).")
-
-    # Determina il numero di osservazioni (n_obs) e variabili (n_vars) dai dati
-    n_obs, n_vars = data.shape
-
-    # Funzione interna per creare una matrice laggata
-    def create_lagged_matrix(data, lags):
-        """
-        Crea una matrice laggata concatenando i lag specificati.
-
-        Args:
-            data (np.ndarray): Dati delle serie temporali.
-            lags (int): Numero di lag.
-
-        Returns:
-            np.ndarray: Matrice laggata.
-        """
-        # Costruisce la matrice laggata concatenando le colonne corrispondenti ai lag
-        return np.column_stack([data[i:-(lags - i) or None] for i in range(lags)])
-
-    # Calcola le differenze prime dei dati per ottenere la serie stazionaria
-    delta_data = np.diff(data, axis=0)
-
-    # Inizializza un dizionario per salvare i risultati
-    results = {}
-
-    # Itera sulle assunzioni del trend deterministico (-1, 0, 1)
-    for det_order in [-1, 0, 1]:
-        #print(f"Processing deterministic trend assumption: det_order={det_order}")
-
-        # Crea la matrice laggata dalle differenze prime
-        X_lag = create_lagged_matrix(delta_data, max_lags)
-
-        # Aggiunge componenti deterministiche basate su det_order
-        if det_order == -1:
-            X = X_lag  # Nessuna intercetta o trend
-        elif det_order == 0:
-            # Aggiunge una colonna di 1 per rappresentare l'intercetta
-            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])
-        else:
-            # Aggiunge sia l'intercetta che un trend lineare
-            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)
-            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])
-
-        # Allinea i dati differenziati con la matrice laggata
-        Y = delta_data[max_lags:]  # Rimuove i primi max_lags osservazioni per allineamento
-
-        # Esegue una regressione di Y su X per ottenere i residui di Y
-        beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
-        residuals_Y = Y - X @ beta_X  # Residui di Y calcolati come Y - Xβ
-
-        # Allinea i livelli originali (Z) con le variabili laggate
-        Z = data[max_lags:max_lags + X.shape[0]]  # Rimuove osservazioni iniziali
-        # Esegue una regressione di Z su X per ottenere i residui di Z
-        beta_Z = np.linalg.lstsq(X, Z, rcond=None)[0]  # Coefficienti della regressione
-        residuals_Z = Z - X @ beta_Z  # Residui di Z calcolati come Z - Xβ
-
-        # Calcola le matrici di covarianza usando i residui
-        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza di Y
-        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza di Z
-        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza incrociata Y-Z
-        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza incrociata Z-Y
-
-        # Costruisce la matrice per calcolare autovalori e autovettori
-        eig_matrix = inv(S00) @ S01 @ inv(S11) @ S10
-        eigenvalues, eigenvectors = eig(eig_matrix)  # Calcola autovalori e autovettori
-        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo autovalori reali positivi
-
-        # Calcola le statistiche trace e max eigenvalue
-        n_obs_eff = n_obs - max_lags  # Numero effettivo di osservazioni
-        trace_stats = -n_obs_eff * np.cumsum(np.log(1 - eigenvalues[::-1]))[::-1]  # Statistica trace
-        max_eigen_stats = -n_obs_eff * np.log(1 - eigenvalues)  # Statistica max eigenvalue
-
-        # Inizializza un dizionario per salvare i risultati per ogni livello di significatività
-        results[f"det_order_{det_order}"] = {}
-
-        # Itera su ogni livello di significatività fornito
-        for alpha in alphas:
-            #print(f"Testing significance level: alpha={alpha}")
-
-            # Calcola i valori critici basati sulle tabelle di Johansen
-            trace_critical_values, _ = zip(
-                *[compute_critical_values(r, alpha, det_order) for r in range(len(eigenvalues))]
-            )
-
-            # Calcola i p-value per le statistiche trace e max eigenvalue
-            trace_p_values = [1 - chi2.cdf(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
-            _ = [1 - chi2.cdf(stat, 1) for stat in max_eigen_stats]
-
-            # Determina il rango basato sulle statistiche trace
-            rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
-
-            # Crea una tabella formattata per visualizzare i risultati
-            results_table = "\n".join([
-                f"Deterministic trend assumption: {det_order}",
-                f"Significance level: {alpha:.2f}",
-                "r | h  |  stat    | cValue   | pValue  | eigVal",
-                "-" * 60,
-                *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
-                  for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
-                f"\nRank: {rank_trace}",
-                "=" * 60
-            ])
-
-            # Salva i risultati per questo livello di significatività
-            results[f"det_order_{det_order}"][f"alpha_{alpha:.2f}"] = {
-                "eigenvalues": eigenvalues,  # Autovalori calcolati
-                "trace_stats": trace_stats,  # Statistiche trace
-                "trace_critical_values": trace_critical_values,  # Valori critici per trace
-                "trace_p_values": trace_p_values,  # P-value per le statistiche trace
-                "rank_trace": rank_trace,  # Rango stimato
-                "results_table": results_table,  # Tabella formattata
-            }
-
-    if isinstance(results, dict):  # Ensure `results` is a dictionary
-        for det_order, alpha_results in results.items():
-            #print(f"Processing det_order: {det_order}")
-            if isinstance(alpha_results, dict):  # Ensure `alpha_results` is a dictionary
-                for alpha, details in alpha_results.items():
-                    #print(f"Processing alpha: {alpha}")
-                    if "results_table" in details:  # Ensure key exists
-                        print(details["results_table"])
-                    else:
-                        print(f"Missing 'results_table' in details: {details}")
-            else:
-                print(f"Unexpected type for alpha_results: {type(alpha_results)}")
-    else:
-        print(f"Unexpected type for results: {type(results)}")
-
-    # Ritorna il dizionario dei risultati
     return results
-
-
-#    # Controlla se i dati sono in formato Pandas e convertili in array NumPy
+#def compute_critical_values(rank, alpha, det_order):
+#    """
+#    Calcola i valori critici per il test di Johansen basati su tabelle predefinite.
+#
+#    Args:
+#        n_vars (int): Numero di variabili nel dataset (es. 2).
+#        rank (int): Rango attualmente testato (es. 0 o 1).
+#        alpha (float): Livello di significatività (es. 0.10, 0.05, 0.01).
+#        det_order (int): Assunzione sul trend deterministico (-1, 0, 1).
+#
+#    Returns:
+#        tuple: (valore_critico_trace, valore_critico_maxeig)
+#    """
+#    # Tabelle dei valori critici (esempio per n_vars = 2)
+#    johansen_critical_values = {
+#        -1: {  # Nessuna intercetta o trend
+#            0: {0.10: 13.43, 0.05: 15.67, 0.01: 20.04},
+#            1: {0.10: 2.71, 0.05: 3.84, 0.01: 6.65},
+#        },
+#        0: {  # Solo intercetta
+#            0: {0.10: 18.17, 0.05: 19.22, 0.01: 25.32},
+#            1: {0.10: 7.52, 0.05: 9.16, 0.01: 12.25},
+#        },
+#        1: {  # Intercetta e trend lineare
+#            0: {0.10: 23.15, 0.05: 23.78, 0.01: 30.45},
+#            1: {0.10: 10.55, 0.05: 12.39, 0.01: 15.72},
+#        },
+#    }
+#
+#    # Recupera i valori critici basati su det_order, rank e alpha
+#    try:
+#        critical_value_trace = johansen_critical_values[det_order][rank][alpha]
+#        critical_value_maxeig = johansen_critical_values[det_order][rank][alpha]
+#    except KeyError:
+#        raise ValueError("Valori critici non disponibili per i parametri specificati.")
+#
+#    return critical_value_trace, critical_value_maxeig
+#
+#def jcitest(data, max_lags=1, alphas=0.05):
+#    """
+#    Esegui il Johansen Cointegration Test con valori critici personalizzabili.
+#
+#    Args:
+#        data (np.ndarray o pd.DataFrame): Dataset delle serie temporali (n_obs x n_vars).
+#        max_lags (int): Numero massimo di lag inclusi nel modello.
+#        alphas (tuple): Livelli di significatività da testare (es. (0.10, 0.05, 0.01)).
+#        dist_type (str): Tipo di distribuzione per i valori critici ("chi2", "gamma", "skewed_t").
+#        kwargs: Parametri addizionali per il calcolo dei valori critici.
+#
+#    Returns:
+#        dict: Risultati per ogni assunzione sul trend deterministico (-1, 0, 1).
+#    """
+#    # Assicura che alphas sia una tupla
+#    if isinstance(alphas, (float, int)):  # Se è un singolo numero
+#        alphas = (alphas,)
+#    # Se i dati sono un DataFrame Pandas o una Serie, convertili in un array NumPy
 #    if isinstance(data, pd.DataFrame) or isinstance(data, pd.Series):
-#        data = data.to_numpy()  # Converte oggetti Pandas in array NumPy
+#        data = data.to_numpy()
 #
-#    # Verifica che i dati siano bidimensionali
+#    # Controlla che i dati siano bidimensionali (n_obs x n_vars)
 #    if data.ndim != 2:
-#        raise ValueError("Input data must be bidimensional (n_obs x n_vars).")
+#        raise ValueError("Input data must be 2D (n_obs x n_vars).")
 #
-#    # Ottieni il numero di osservazioni e variabili
+#    # Determina il numero di osservazioni (n_obs) e variabili (n_vars) dai dati
 #    n_obs, n_vars = data.shape
 #
-#    # Calcola le differenze prime dei dati
-#    delta_data = np.diff(data, axis=0)  # Differenza prima lungo le righe
-#    Y = delta_data[max_lags:]  # Allinea i dati differenziati per i lag
-#    X_lag = create_lagged_matrix(delta_data, max_lags)  # Crea le variabili laggate
-#    Z_lag = data[max_lags:-1]  # Crea la matrice dei lag
+#    # Funzione interna per creare una matrice laggata
+#    def create_lagged_matrix(data, lags):
+#        """
+#        Crea una matrice laggata concatenando i lag specificati.
 #
-#    ## Mappa dei valori critici per diversi livelli di significatività
-#    #critical_values_map = {
-#    #    0.10: [10.49, 2.71],  # Valori critici al 90%
-#    #    0.05: [12.32, 4.13],  # Valori critici al 95%
-#    #    0.01: [16.36, 6.94],  # Valori critici al 99%
-#    #}
+#        Args:
+#            data (np.ndarray): Dati delle serie temporali.
+#            lags (int): Numero di lag.
 #
-#    # Controlla se il valore di alpha è valido
-#    if alpha not in [0.10, 0.05, 0.01]:
-#        raise ValueError("Alpha value not valid. Use 0.10, 0.05 or 0.01.")
+#        Returns:
+#            np.ndarray: Matrice laggata.
+#        """
+#        # Costruisce la matrice laggata concatenando le colonne corrispondenti ai lag
+#        return np.column_stack([data[i:-(lags - i) or None] for i in range(lags)])
 #
-#    ## Seleziona i valori critici appropriati in base ad alpha
-#    #critical_values = critical_values_map[alpha]
+#    # Calcola le differenze prime dei dati per ottenere la serie stazionaria
+#    delta_data = np.diff(data, axis=0)
 #
-#    # Dizionario per salvare i risultati
+#    # Inizializza un dizionario per salvare i risultati
 #    results = {}
 #
-#    # Ciclo su tutte le assunzioni sul trend deterministico
+#    # Itera sulle assunzioni del trend deterministico (-1, 0, 1)
 #    for det_order in [-1, 0, 1]:
-#        # Creazione delle componenti deterministiche
+#        #print(f"Processing deterministic trend assumption: det_order={det_order}")
+#
+#        # Crea la matrice laggata dalle differenze prime
+#        X_lag = create_lagged_matrix(delta_data, max_lags)
+#
+#        # Aggiunge componenti deterministiche basate su det_order
 #        if det_order == -1:
-#            X = X_lag  # Nessun intercetta o trend
+#            X = X_lag  # Nessuna intercetta o trend
 #        elif det_order == 0:
-#            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])  # Solo intercetta
-#        elif det_order == 1:
-#            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)  # Crea il trend lineare
-#            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])  # Intercetta e trend
+#            # Aggiunge una colonna di 1 per rappresentare l'intercetta
+#            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1))])
+#        else:
+#            # Aggiunge sia l'intercetta che un trend lineare
+#            trend = np.arange(1, X_lag.shape[0] + 1).reshape(-1, 1)
+#            X = np.hstack([X_lag, np.ones((X_lag.shape[0], 1)), trend])
 #
-#        # Esegui la regressione di Y su X e calcola i residui
+#        # Allinea i dati differenziati con la matrice laggata
+#        Y = delta_data[max_lags:]  # Rimuove i primi max_lags osservazioni per allineamento
+#
+#        # Esegue una regressione di Y su X per ottenere i residui di Y
 #        beta_X = np.linalg.lstsq(X, Y, rcond=None)[0]  # Coefficienti della regressione
-#        residuals_Y = Y - X @ beta_X  # Residui di Y su X
+#        residuals_Y = Y - X @ beta_X  # Residui di Y calcolati come Y - Xβ
 #
-#        # Esegui la regressione di Z su X e calcola i residui
-#        beta_Z = np.linalg.lstsq(X, Z_lag, rcond=None)[0]
-#        residuals_Z = Z_lag - X @ beta_Z
+#        # Allinea i livelli originali (Z) con le variabili laggate
+#        Z = data[max_lags:max_lags + X.shape[0]]  # Rimuove osservazioni iniziali
+#        # Esegue una regressione di Z su X per ottenere i residui di Z
+#        beta_Z = np.linalg.lstsq(X, Z, rcond=None)[0]  # Coefficienti della regressione
+#        residuals_Z = Z - X @ beta_Z  # Residui di Z calcolati come Z - Xβ
 #
-#        # Calcola le matrici di covarianza
-#        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui YY
-#        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza dei residui ZZ
-#        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza dei residui YZ
-#        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza dei residui ZY
+#        # Calcola le matrici di covarianza usando i residui
+#        S11 = residuals_Y.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza di Y
+#        S00 = residuals_Z.T @ residuals_Z / residuals_Z.shape[0]  # Covarianza di Z
+#        S01 = residuals_Y.T @ residuals_Z / residuals_Y.shape[0]  # Covarianza incrociata Y-Z
+#        S10 = residuals_Z.T @ residuals_Y / residuals_Y.shape[0]  # Covarianza incrociata Z-Y
 #
-#        # Calcola la matrice degli autovalori
+#        # Costruisce la matrice per calcolare autovalori e autovettori
 #        eig_matrix = inv(S00) @ S01 @ inv(S11) @ S10
-#        eigenvalues, eigenvectors = eig(eig_matrix)  # Autovalori e autovettori
-#        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo gli autovalori reali positivi
+#        eigenvalues, eigenvectors = eig(eig_matrix)  # Calcola autovalori e autovettori
+#        eigenvalues = np.real(eigenvalues[eigenvalues > 0])  # Considera solo autovalori reali positivi
 #
 #        # Calcola le statistiche trace e max eigenvalue
 #        n_obs_eff = n_obs - max_lags  # Numero effettivo di osservazioni
 #        trace_stats = -n_obs_eff * np.cumsum(np.log(1 - eigenvalues[::-1]))[::-1]  # Statistica trace
 #        max_eigen_stats = -n_obs_eff * np.log(1 - eigenvalues)  # Statistica max eigenvalue
 #
-#        # Funzione per calcolare i p-value usando la distribuzione Chi-quadro
-#        def p_value_chi2(stat, dof):
-#            return 1 - chi2.cdf(stat, dof)
+#        # Inizializza un dizionario per salvare i risultati per ogni livello di significatività
+#        results[f"det_order_{det_order}"] = {}
 #
-#        # Calcola i p-value per le statistiche trace e max eigenvalue
-#        trace_p_values = [p_value_chi2(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
-#        max_eigen_p_values = [p_value_chi2(stat, 1) for stat in max_eigen_stats]
+#        # Itera su ogni livello di significatività fornito
+#        for alpha in alphas:
+#            #print(f"Testing significance level: alpha={alpha}")
 #
-#        # Calcola dinamicamente i valori critici per trace e max eigenvalue
-#        trace_critical_values = []
-#        maxeig_critical_values = []
-#        for r in range(len(eigenvalues)):
-#            crit_trace, crit_maxeig = compute_critical_values(n_vars, r + 1, alpha)
-#            trace_critical_values.append(crit_trace)
-#            maxeig_critical_values.append(crit_maxeig)
+#            # Calcola i valori critici basati sulle tabelle di Johansen
+#            trace_critical_values, _ = zip(
+#                *[compute_critical_values(r, alpha, det_order) for r in range(len(eigenvalues))]
+#            )
 #
-#        # Determina le ipotesi per trace e max eigenvalue
-#        trace_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(trace_stats, trace_critical_values)]
-#        maxeig_hypotheses = [1 if stat > crit else 0 for stat, crit in zip(max_eigen_stats, maxeig_critical_values)]
+#            # Calcola i p-value per le statistiche trace e max eigenvalue
+#            trace_p_values = [1 - chi2.cdf(stat, n_vars - i) for i, stat in enumerate(trace_stats)]
+#            _ = [1 - chi2.cdf(stat, 1) for stat in max_eigen_stats]
 #
-#        # Determina il rango basato sulle statistiche trace
-#        rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
+#            # Determina il rango basato sulle statistiche trace
+#            rank_trace = sum(stat > crit for stat, crit in zip(trace_stats, trace_critical_values))
 #
-#        # Crea una tabella dei risultati formattata
-#        results_table = "\n".join([
-#            f"Assunzione sul Trend Deterministico: {det_order}",
-#            f"Livello di Significatività: {alpha:.2f}",
-#            "r | h  |  stat    | cValue   | pValue  | eigVal",
-#            "-" * 60,
-#            *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
-#              for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
-#            f"\nRank: {rank_trace}",
-#            "=" * 60
-#        ])
+#            # Crea una tabella formattata per visualizzare i risultati
+#            results_table = "\n".join([
+#                f"Deterministic trend assumption: {det_order}",
+#                f"Significance level: {alpha:.2f}",
+#                "r | h  |  stat    | cValue   | pValue  | eigVal",
+#                "-" * 60,
+#                *(f"{i} | {stat > trace_critical_values[i]} | {stat:.4f} | {trace_critical_values[i]:.4f} | {p_value:.4f} | {eigenvalue:.4f}"
+#                  for i, (stat, p_value, eigenvalue) in enumerate(zip(trace_stats, trace_p_values, eigenvalues))),
+#                f"\nRank: {rank_trace}",
+#                "=" * 60
+#            ])
 #
-#        # Salva i risultati per questa assunzione di det_order
-#        results[f"det_order_{det_order}"] = {
-#            "eigenvalues": eigenvalues,  # Autovalori
-#            "eigenvectors": eigenvectors,  # Autovettori
-#            "trace_stats": trace_stats,  # Statistiche trace
-#            "trace_p_values": trace_p_values,  # P-value trace
-#            "max_eigen_stats": max_eigen_stats,  # Statistiche max eigenvalue
-#            "max_eigen_p_values": max_eigen_p_values,  # P-value max eigenvalue
-#            "trace_critical_values": trace_critical_values,  # Valori critici trace
-#            "maxeig_critical_values": maxeig_critical_values,  # Valori critici max eigenvalue
-#            "trace_hypotheses": trace_hypotheses,  # Ipotesi trace
-#            "maxeig_hypotheses": maxeig_hypotheses,  # Ipotesi max eigenvalue
-#            "rank_trace": rank_trace,  # Rango basato sulle statistiche trace
-#            "results_table": results_table,  # Tabella dei risultati formattata
-#        }
+#            # Salva i risultati per questo livello di significatività
+#            results[f"det_order_{det_order}"][f"alpha_{alpha:.2f}"] = {
+#                "eigenvalues": eigenvalues,  # Autovalori calcolati
+#                "trace_stats": trace_stats,  # Statistiche trace
+#                "trace_critical_values": trace_critical_values,  # Valori critici per trace
+#                "trace_p_values": trace_p_values,  # P-value per le statistiche trace
+#                "rank_trace": rank_trace,  # Rango stimato
+#                "results_table": results_table,  # Tabella formattata
+#            }
 #
+#    if isinstance(results, dict):  # Ensure `results` is a dictionary
+#        for det_order, alpha_results in results.items():
+#            #print(f"Processing det_order: {det_order}")
+#            if isinstance(alpha_results, dict):  # Ensure `alpha_results` is a dictionary
+#                for alpha, details in alpha_results.items():
+#                    #print(f"Processing alpha: {alpha}")
+#                    if "results_table" in details:  # Ensure key exists
+#                        print(details["results_table"])
+#                    else:
+#                        print(f"Missing 'results_table' in details: {details}")
+#            else:
+#                print(f"Unexpected type for alpha_results: {type(alpha_results)}")
+#    else:
+#        print(f"Unexpected type for results: {type(results)}")
+#
+#    # Ritorna il dizionario dei risultati
 #    return results
+#
+#
+#
+#def print_jcitest_results(results):
+#    """
+#    Prints the Johansen Cointegration Test results in a tabular format.
+#
+#    Parameters:
+#        results (dict): The results from the `jcitest` function.
+#    """
+#    for det_order, result in results.items():
+#        print(f"Deterministic Trend Assumption: {det_order}")
+#        print(f"{'-' * 60}")
+#        
+#        table_data = []
+#        headers = ["r", "h", "Trace Stat", "Critical Value", "p-Value", "Eigenvalue"]
+#        
+#        for i, (trace_stat, crit_value, p_value, eigenvalue) in enumerate(
+#            zip(result["trace_stats"], result["trace_critical_values"], 
+#                result["trace_p_values"], result["eigenvalues"])
+#        ):
+#            h = "True" if trace_stat > crit_value else "False"
+#            table_data.append([i, h, f"{trace_stat:.4f}", f"{crit_value:.4f}", f"{p_value:.4f}", f"{eigenvalue:.4f}"])
+#        
+#        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+#        print(f"Rank (r): {result['rank_trace']}")
+#        print(f"{'=' * 60}\n")
 
 
-def print_jcitest_results(results):
+def egcitest(data, creg='c', rreg='ADF', lags=0, test='t1', alpha=0.05,
+             response_variable=None, predictor_variables=None):
     """
-    Prints the Johansen Cointegration Test results in a tabular format.
-
-    Parameters:
-        results (dict): The results from the `jcitest` function.
-    """
-    for det_order, result in results.items():
-        print(f"Deterministic Trend Assumption: {det_order}")
-        print(f"{'-' * 60}")
-        
-        table_data = []
-        headers = ["r", "h", "Trace Stat", "Critical Value", "p-Value", "Eigenvalue"]
-        
-        for i, (trace_stat, crit_value, p_value, eigenvalue) in enumerate(
-            zip(result["trace_stats"], result["trace_critical_values"], 
-                result["trace_p_values"], result["eigenvalues"])
-        ):
-            h = "True" if trace_stat > crit_value else "False"
-            table_data.append([i, h, f"{trace_stat:.4f}", f"{crit_value:.4f}", f"{p_value:.4f}", f"{eigenvalue:.4f}"])
-        
-        print(tabulate(table_data, headers=headers, tablefmt="grid"))
-        print(f"Rank (r): {result['rank_trace']}")
-        print(f"{'=' * 60}\n")
-
-
-
-def egcitest(Y, X, max_lags=0):
-    """
-    Implementazione manuale del test di Engle-Granger per la cointegrazione.
-
-    Argomenti:
-        Y (array-like): Serie temporale dipendente.
-        X (array-like): Serie temporale indipendente.
-        max_lags (int): max_lags (int): Numero massimo di lag inclusi nel ADF test (default = 0).
-
-    Restituisce:
-        dict: Risultati del test con statistiche, p-value e conclusione.
+    Test di cointegrazione Engle-Granger.
+    
+    Parametri:
+    - data: numpy.ndarray, pandas.DataFrame o pandas.Series (i dati di input)
+    - creg: str, tipo di regressione ('nc', 'c', 'ct', 'ctt')
+    - cvec: list o numpy.ndarray, coefficienti specificati dall'utente
+    - rreg: str, metodo per la regressione residua ('ADF' o 'PP')
+    - lags: int, numero di lag per il test residuo
+    - test: str, tipo di test ('t1', 't2')
+    - alpha: float, livello di significatività
+    - response_variable: str, variabile di risposta (se data è un DataFrame)
+    - predictor_variables: list, variabili predittive (se data è un DataFrame)
+    
+    Ritorna:
+    - results: dict, contiene statistiche del test, p-value e valori critici
     """
 
-    if not isinstance(X, (pd.Series, pd.DataFrame)):
-        X = pd.Series(X)
-    if not isinstance(Y, (pd.Series, pd.DataFrame)):
-        Y = pd.Series(Y)
+    # Converti i dati in array numpy se sono un DataFrame o una Series
+    if isinstance(data, pd.DataFrame):
+        if response_variable:  # Se è specificata una variabile di risposta
+            y = data[response_variable].values  # Estrai la variabile di risposta
+        else:
+            y = data.iloc[:, 0].values  # Per default usa la prima colonna come risposta
+        if predictor_variables:  # Se sono specificate variabili predittive
+            x = data[predictor_variables].values  # Estrai le variabili predittive
+        else:
+            x = data.drop(columns=[data.columns[0]]).values  # Usa tutte le altre colonne
+    elif isinstance(data, (np.ndarray, pd.Series)):  # Se i dati sono un array numpy o una Series
+        y = data[:, 0] if data.ndim > 1 else data  # La prima colonna è la variabile di risposta
+        x = data[:, 1:] if data.ndim > 1 else None  # Le altre colonne sono predittori
+    else:
+        raise ValueError("I dati devono essere un array numpy, un DataFrame pandas o una Series.")
 
-    # Regressione OLS di Y su X
-    #if "const" not in X.columns: # Controllo se X ha già una colonna di costante; in caso contrario, la aggiungo.
-    X = sm.add_constant(X)  # Aggiunge un termine costante al modello
-    model = sm.OLS(Y, X).fit()  # Esegue la regressione OLS
-    residuals = model.resid  # Estrae i residui dal modello
+    # Controlla che ci siano abbastanza predittori
+    if x is None or x.shape[1] < 1:
+        raise ValueError("I dati devono avere almeno una variabile predittiva.")
+    # Verifica che i lag siano validi
+    if not isinstance(lags, int) or lags < 0:
+        raise ValueError("Il numero di lag deve essere un intero non negativo.")
+    # Controlla che il tipo di regressione sia valido
+    if creg not in ['nc', 'c', 'ct', 'ctt']:
+        raise ValueError("Valore di 'creg' non valido. Usa ['nc', 'c', 'ct', 'ctt'].")
+    # Controlla che il metodo di regressione residua sia valido
+    if rreg not in ['ADF', 'PP']:
+        raise ValueError("Valore di 'rreg' non valido. Usa ['ADF', 'PP'].")
+    # Controlla che il tipo di test sia valido
+    if test not in ['t1', 't2']:
+        raise ValueError("Valore di 'test' non valido. Usa ['t1', 't2'].")
+    # Controlla che alpha sia compreso tra 0 e 1
+    if not (0 < alpha < 1):
+        raise ValueError("Alpha deve essere compreso tra 0 e 1.")
 
-    # Test ADF sui residui per valutare la stazionarietà
-    adf_result = adfuller(residuals, maxlag=max_lags, autolag=None if max_lags > 0 else "AIC")
-    adf_statistic = adf_result[0]  # Statistica del test ADF
-    p_value = adf_result[1]  # p-value del test ADF
-    critical_values = adf_result[4]  # Valori critici del test ADF
+    # Step 1: Esegui la regressione di cointegrazione
+    if creg == 'nc':  # Nessuna costante
+        x_design = x
+    elif creg == 'c':  # Solo costante
+        x_design = np.hstack((np.ones((x.shape[0], 1)), x))  # Aggiungi una colonna di 1
+    elif creg == 'ct':  # Costante e trend
+        trend = np.arange(1, x.shape[0] + 1).reshape(-1, 1)  # Crea una colonna con i numeri da 1 a n
+        x_design = np.hstack((np.ones((x.shape[0], 1)), trend, x))  # Aggiungi trend e costante
+    elif creg == 'ctt':  # Costante, trend e trend quadratico
+        trend = np.arange(1, x.shape[0] + 1).reshape(-1, 1)  # Crea una colonna di trend
+        trend2 = trend ** 2  # Crea una colonna di trend quadratico
+        x_design = np.hstack((np.ones((x.shape[0], 1)), trend, trend2, x))  # Aggiungi tutto
 
-    # Calcolo dell'errore standard residuo
-    # L'errore standard residuo tiene conto dei gradi di libertà
-    residual_std_error = np.sqrt(np.sum(residuals**2) / (len(residuals) - len(model.params)))
+    # Esegui la regressione OLS
+    coeffs = np.linalg.lstsq(x_design, y, rcond=None)[0]  # Calcola i coefficienti con OLS
+    residuals = y - x_design @ coeffs  # Calcola i residui della regressione
 
-    # Conclusione sulla cointegrazione
-    conclusion = "Cointegrated" if p_value < 0.05 else "Not Cointegrated"
+    # Step 2: Esegui il test di radice unitaria sui residui
+    if rreg == 'ADF':  # Usa il test ADF
+        adf_result = adfuller(residuals, maxlag=lags, regression='c' if test == 't1' else 'ct')
+        test_statistic, p_value, critical_values = adf_result[0], adf_result[1], adf_result[4]
+    elif rreg == 'PP':  # Placeholder per il test PP (non implementato)
+        raise NotImplementedError("Il test PP non è ancora implementato.")
 
-    # Stampiamo i risultati del test
-    print("\nEngle-Granger Test Results")
-    print("OLS Results:")
-    print(f"  Coefficients: {model.params}")  # Coefficienti stimati dal modello
-    print(f"  Residual SE: {residual_std_error:.4f}")  # Errore standard residuo
-    print("\nADF Test on the Residuals:")
-    print(f"  Stat: {adf_statistic:.4f}")  # Statistica del test ADF
-    print(f"  P-value: {p_value:.4f}")  # p-value del test
-    print("  Critical Values:")
+    # Interpola i valori critici se necessario (non implementato in questo esempio)
+
+    # Step 3: Prepara i risultati
+    results = {
+        'test_statistic': test_statistic,  # Statistica del test
+        'p_value': p_value,  # P-value del test
+        'critical_values': critical_values,  # Valori critici
+        'coefficients': coeffs,  # Coefficienti della regressione
+        'residuals': residuals  # Residui della regressione
+    }
+
+    # Stampa i risultati
+    print("\nEngle-Granger Cointegration Test Results")
+    print(f"Statistic: {test_statistic:.4f}")
+    print(f"P-Value: {p_value:.4f}")
+    print("Critical Values:")
     for key, value in critical_values.items():
-        print(f"    {key}: {value:.4f}")  # Stampiamo i valori critici formattati
-    print(f"Conclusion: {conclusion}")  # Stampiamo la conclusione
+        print(f"  {key}: {value:.4f}")
 
-    # Restituiamo i risultati come dizionario
-    return {
-        "coefficients": model.params,  # Coefficienti del modello OLS
-        "residuals": residuals,  # Residui del modello
-        "adf_statistic": adf_statistic,  # Statistica del test ADF
-        "p_value": p_value,  # p-value del test ADF
-        "critical_values": critical_values,  # Valori critici del test ADF
-        "conclusion": conclusion,  # Conclusione sulla cointegrazione
-    }
-
-
-
-def granger_causality_test(y, x, max_lag):
-    """
-    Implementazione manuale del test di causalità di Granger.
-
-    Argomenti:
-        y (np.ndarray): Variabile dipendente (serie target).
-        x (np.ndarray): Variabile indipendente (serie predittore).
-        max_lag (int): Numero massimo di ritardi da includere.
-
-    Risultato:
-        dict: Contiene F-statistic, p-value e conclusione del test.
-    """
-    # Se x è un array numpy, convertilo in una Serie Pandas
-    if isinstance(x, np.ndarray):
-        x = pd.Series(x)
-    # Se y è un array numpy, convertilo in una Serie Pandas
-    if isinstance(y, np.ndarray):
-        y = pd.Series(y)
-
-    # Controllo della lunghezza delle serie
-    if len(x) != len(y):
-        raise ValueError("Input time series must have the same lenght.")
-    # Verifica che il numero massimo di lag sia compatibile con la lunghezza della serie
-    if max_lag >= len(y):
-        raise ValueError("max_lag must be less than the lenght of input time series.")
-
-    # Funzione per creare una matrice di ritardi per una serie temporale
-    def create_lagged_matrix(series, lags):
-        # Costruisce una matrice con colonne che rappresentano ritardi successivi della serie
-        return np.column_stack([series.shift(i).to_numpy() for i in range(1, lags + 1)])[lags:]
-
-    # Creazione delle matrici di ritardi per Y e X
-    lagged_y = create_lagged_matrix(y, max_lag)  # Matrice dei ritardi per Y
-    lagged_x = create_lagged_matrix(x, max_lag)  # Matrice dei ritardi per X
-    trimmed_y = y[max_lag:].to_numpy()  # Allinea Y con le matrici di ritardo
-
-    # Modello ristretto: regressione di Y sui propri ritardi
-    restricted_model_data = sm.add_constant(lagged_y)  # Aggiunge una costante per la regressione
-    restricted_model = sm.OLS(trimmed_y, restricted_model_data).fit()  # Esegue la regressione
-    ssr_restricted = restricted_model.ssr  # Somma dei residui quadrati (modello ristretto)
-
-    # Modello non ristretto: regressione di Y sui ritardi di Y e X
-    unrestricted_model_data = sm.add_constant(np.hstack([lagged_y, lagged_x]))  # Aggiunge X ai predittori
-    unrestricted_model = sm.OLS(trimmed_y, unrestricted_model_data).fit()  # Esegue la regressione
-    ssr_unrestricted = unrestricted_model.ssr  # Somma dei residui quadrati (modello non ristretto)
-
-    # Calcolo della statistica F per il test di causalità di Granger
-    n_lags = max_lag  # Gradi di libertà per il numeratore
-    df_resid = len(trimmed_y) - unrestricted_model_data.shape[1]  # Gradi di libertà per il denominatore
-    f_stat = ((ssr_restricted - ssr_unrestricted) / n_lags) / (ssr_unrestricted / df_resid)  # Formula della statistica F
-
-    # Calcolo del p-value utilizzando la distribuzione F
-    p_value = 1 - f.cdf(f_stat, n_lags, df_resid)  # Calcola il p-value dalla cdf della distribuzione F
-
-    # Step 4: Conclusion
-    conclusion = "X Granger-causes Y" if p_value < 0.05 else "No Granger causality from X to Y"
-
-    # Print Results
-    print("\nGranger Causality Test Results")
-    print(f"Restricted SSR: {ssr_restricted:.4f}")
-    print(f"Unrestricted SSR: {ssr_unrestricted:.4f}")
-    print(f"F-statistic: {f_stat:.4f}")
-    print(f"P-value: {p_value:.4f}")
-    print(f"Conclusion: {conclusion}")
-
-    # Return results as a dictionary
-    return {
-        "f_stat": f_stat,
-        "p_value": p_value,
-        "ssr_restricted": ssr_restricted,
-        "ssr_unrestricted": ssr_unrestricted,
-        "conclusion": conclusion,
-    }
-
-
-
-# Funzione per analizzare la cointegrazione tra due serie temporali con opzioni per i parametri di Johansen e confronto con test di Engle-Granger
-
-#def analyze_cointegration(ts1, ts2, max_lags=0):
-#    """    
-#    Argomenti:
-#    - ts1, ts2: Serie temporali (array o pandas Series)
-#    - max_lags: Numero di lag da includere nella differenziazione per il test di Johansen (predefinito è 0)
-#    
-#    Restituisce:
-#    - Dizionario con i risultati del test di Johansen e del test di Engle-Granger
+    return results
+#def egcitest(Y, X, max_lags=0):
 #    """
-#    results = {}  # Dizionario per salvare i risultati finali
-#    johansen_results = {}  # Dizionario per i risultati del test di Johansen
-#    det_orders = [-1, 0, 1]  # Ordini deterministici: -1 (nessuna costante), 0 (costante), 1 (costante + trend)
-#    best_det_order = None  # Variabile per salvare il miglior ordine deterministico
-#    best_rank = 0  # Variabile per salvare il rank di cointegrazione più alto trovato
-#    
-#    # TEST DI JOHANSEN PER LA COINTEGRAZIONE
-#    print(" Johansen Test Results ")
-#    for det_order in det_orders:  # Itera su ciascun ordine deterministico
-#        # Applico il test di Johansen
-#        johansen_test = coint_johansen(
-#            endog=np.column_stack((ts1, ts2)), det_order=det_order, k_ar_diff=max_lags
-#        )
-#        trace_stats = johansen_test.lr1  # Statistiche Trace
-#        critical_values = johansen_test.cvt  # Valori critici (90%, 95%, 99%)
+#    Implementazione manuale del test di Engle-Granger per la cointegrazione.
 #
-#        # Calcolo del rank di cointegrazione confrontando le statistiche con i valori critici al 95%
-#        rank = 0
-#        for i, stat in enumerate(trace_stats):
-#            if stat > critical_values[i, 2]:  # Confronta con il valore critico al 99%
-#                rank += 1
-#        
-#        # Salvo i risultati per ogni ordine deterministico
-#        johansen_results[f"det_order={det_order}"] = {
-#            "trace_stats": trace_stats,
-#            "critical_values": critical_values,
-#            "rank": rank
-#        }
+#    Argomenti:
+#        Y (array-like): Serie temporale dipendente.
+#        X (array-like): Serie temporale indipendente.
+#        max_lags (int): max_lags (int): Numero massimo di lag inclusi nel ADF test (default = 0).
 #
-#        # Stampa i risultati intermedi
-#        print(f"\nDeterministic Order: {det_order}")
-#        print(f"Trace Statistics: {trace_stats}")
-#        print(f"Critical Values (90%, 95%, 99%):\n{critical_values}")
-#        print(f"Cointegration Rank: {rank}")
+#    Restituisce:
+#        dict: Risultati del test con statistiche, p-value e conclusione.
+#    """
 #
-#        # Aggiorno il miglior ordine deterministico se trovo un rank più alto
-#        if rank > best_rank:
-#            best_rank = rank
-#            best_det_order = det_order
+#    if not isinstance(X, (pd.Series, pd.DataFrame)):
+#        X = pd.Series(X)
+#    if not isinstance(Y, (pd.Series, pd.DataFrame)):
+#        Y = pd.Series(Y)
 #
-#    # Salvo il miglior ordine deterministico e il rank di cointegrazione nel dizionario dei risultati
-#    results['Johansen Test'] = johansen_results
-#    results['Best Deterministic Order'] = best_det_order
-#    results['Best Rank'] = best_rank
+#    # Regressione OLS di Y su X
+#    #if "const" not in X.columns: # Controllo se X ha già una colonna di costante; in caso contrario, la aggiungo.
+#    X = sm.add_constant(X)  # Aggiunge un termine costante al modello
+#    model = sm.OLS(Y, X).fit()  # Esegue la regressione OLS
+#    residuals = model.resid  # Estrae i residui dal modello
 #
-#    # Stampo il risultato finale del test di Johansen
-#    print("\n Best Cointegration Results ")
-#    print(f"Best Deterministic Order: {best_det_order}")
-#    print(f"Best Cointegration Rank: {best_rank}")
+#    # Test ADF sui residui per valutare la stazionarietà
+#    adf_result = adfuller(residuals, maxlag=max_lags, autolag=None if max_lags > 0 else "AIC")
+#    adf_statistic = adf_result[0]  # Statistica del test ADF
+#    p_value = adf_result[1]  # p-value del test ADF
+#    critical_values = adf_result[4]  # Valori critici del test ADF
 #
-#    # TEST DI ENGLE-GRANGER PER LA COINTEGRAZIONE
-#    score, p_value, _ = sm.tsa.coint(ts1, ts2)
-#    engle_granger_results = {
-#        "score": score,               # Statistica del test di Engle-Granger
-#        "p_value": p_value,           # P-value associato al test
-#        "cointegration": p_value < 0.05  # Verifica se c'è cointegrazione (p-value < 0.05)
+#    # Calcolo dell'errore standard residuo
+#    # L'errore standard residuo tiene conto dei gradi di libertà
+#    residual_std_error = np.sqrt(np.sum(residuals**2) / (len(residuals) - len(model.params)))
+#
+#    # Conclusione sulla cointegrazione
+#    conclusion = "Cointegrated" if p_value < 0.05 else "Not Cointegrated"
+#
+#    # Stampiamo i risultati del test
+#    print("\nEngle-Granger Test Results")
+#    print("OLS Results:")
+#    print(f"  Coefficients: {model.params}")  # Coefficienti stimati dal modello
+#    print(f"  Residual SE: {residual_std_error:.4f}")  # Errore standard residuo
+#    print("\nADF Test on the Residuals:")
+#    print(f"  Stat: {adf_statistic:.4f}")  # Statistica del test ADF
+#    print(f"  P-value: {p_value:.4f}")  # p-value del test
+#    print("  Critical Values:")
+#    for key, value in critical_values.items():
+#        print(f"    {key}: {value:.4f}")  # Stampiamo i valori critici formattati
+#    print(f"Conclusion: {conclusion}")  # Stampiamo la conclusione
+#
+#    # Restituiamo i risultati come dizionario
+#    return {
+#        "coefficients": model.params,  # Coefficienti del modello OLS
+#        "residuals": residuals,  # Residui del modello
+#        "adf_statistic": adf_statistic,  # Statistica del test ADF
+#        "p_value": p_value,  # p-value del test ADF
+#        "critical_values": critical_values,  # Valori critici del test ADF
+#        "conclusion": conclusion,  # Conclusione sulla cointegrazione
 #    }
-#    results['Engle-Granger Test'] = engle_granger_results
-#
-#    # Stampa i risultati del test di Engle-Granger
-#    print("\n Engle-Granger Test Results ")
-#    print(f"Score: {score}")
-#    print(f"P-value: {p_value}")
-#    if not engle_granger_results['cointegration']:
-#        print("Conclusion: No Cointegration")  # Conclusione se non c'è cointegrazione
-#    else:
-#        print("Conclusion: Cointegration Found")  # Conclusione se c'è cointegrazione
-#
-#    return results
 
-# Funzione per plottare la seasonal decomposition di una time series 
-#def plot_decomposition(df, column, window_sizes, model):
-#
-#    """
-#        Argomenti della funzione:
-#        df (pd.Dataframe): dataframe della time series.
-#        column (str): nome della varibile/time series da estrarre dal dataframe.
-#        window_sizes: lista con i valori dei periodi coi quali fare la decomposizione (1 = annual, 4 = quarterly, 12 = monthly, 365 = daily etc)
-#        model (str): "additive" o "multiplicative".
-#    """
-#
-#    mpl.rcParams['font.family'] = 'Arial'
-#    mpl.rcParams['font.size'] = 16
-#
-#    #
-#    mpl.rcParams['figure.facecolor'] = 'white'
-#    mpl.rcParams['axes.facecolor'] = 'white'
-#    mpl.rcParams['savefig.facecolor'] = 'white'
-#
-#    res = sm.tsa.seasonal_decompose(df, model=model, period=window_sizes)
-#    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(20, 15))
-#    res.observed.plot(ax=ax1, title='Raw')
-#    res.seasonal.plot(ax=ax2, title='Seasonal')
-#    res.trend.plot(ax=ax3, title='Trend')
-#    res.resid.plot(ax=ax4, title='Residual')
-#    plt.tight_layout()
-#    plt.show()
+def gctest(data, num_lags=1, integration=0, constant=True, trend=False, x=None, alpha=0.05,
+           test_type='chi-square', cause_variables=None, effect_variables=None, condition_variables=None,
+           predictor_variables=None):
+    """
+    Test di causalità di Granger e blocco di esogeneità.
+    
+    Parametri:
+    - data: numpy.ndarray o pandas.DataFrame (dati delle serie temporali)
+    - num_lags: int, numero di lag per il modello VAR
+    - integration: int, grado di integrazione per differenziare le serie
+    - constant: bool, includere una costante nel modello VAR
+    - trend: bool, includere un termine di trend nel modello VAR
+    - x: numpy.ndarray, variabili esogene
+    - alpha: float, livello di significatività
+    - test_type: str, tipo di test ('chi-square' o 'f')
+    - cause_variables: list, variabili ipotizzate come cause
+    - effect_variables: list, variabili ipotizzate come effetti
+    - condition_variables: list, variabili di condizionamento
+    - predictor_variables: list, ulteriori predittori esogeni
+    
+    Ritorna:
+    - results: dict o pandas.DataFrame (statistiche del test, p-value, valori critici)
+    """
 
-# function to perform a simple ols regression and retrieve the results
-#def ols_reg(y, x):
-#
-#    """ 
-#    y = your dependent time series (arrays or pandas Series)
-#    x = your covariates/independent variables (arrays or pandas Series or Dataframe)
-#    """
-#
-#    Y = y
-#    X = x
-#    X = sm.add_constant(X)
-#    model = sm.OLS(Y,X)
-#    ols_results = model.fit()
-#    return ols_results
+    # Valida e preelabora i dati di input
+    if isinstance(data, pd.DataFrame):  # Se i dati sono un DataFrame
+        if effect_variables is None:  # Se non sono specificate variabili di effetto
+            effect_variables = [data.columns[-1]]  # Per default usa l'ultima colonna come effetto
+        y2 = data[effect_variables].to_numpy()  # Estrai la variabile di effetto come array numpy
+        # Se non sono specificate variabili di causa, usa tutte le colonne tranne quelle di effetto
+        cause_variables = data.columns.difference(effect_variables).tolist() if cause_variables is None else cause_variables
+        y1 = data[cause_variables].to_numpy()  # Estrai le variabili di causa come array numpy
+        # Variabili di condizionamento, se specificate
+        y3 = data[condition_variables].to_numpy() if condition_variables else np.empty((len(data), 0))
+        # Se sono specificati predittori, estraili
+        if predictor_variables:
+            x = data[predictor_variables].to_numpy()
+    elif isinstance(data, np.ndarray):  # Se i dati sono un array numpy
+        y1, y2 = data[:, :-1], data[:, -1:]  # Considera l'ultima colonna come effetto
+        y3 = np.empty((data.shape[0], 0))  # Nessuna variabile di condizionamento per default
+    else:
+        raise ValueError("I dati devono essere un pandas DataFrame o un array numpy.")
 
-# Function to detect structural break in the data by doing the Chow Test
-#def sbreak_test(X, Y, last_index, first_index=None, significance=0.05):
+    # Converte tutte le serie in array numpy e controlla validità
+    y1, y2, y3, x = [np.asarray(arr, dtype=float) for arr in [y1, y2, y3, x or np.empty((len(y1), 0))]]
+    nobs = min(map(len, [y1, y2, y3, x]))  # Calcola il numero minimo di osservazioni tra le serie
+
+    # Tronca i dati in modo che abbiano la stessa lunghezza
+    y1, y2, y3, x = [arr[-nobs:] if len(arr) > nobs else arr for arr in [y1, y2, y3, x]]
+    y123 = np.hstack((y1, y2, y3))  # Combina tutte le serie in un unico array
+
+    # Controlla per valori mancanti
+    mask = ~np.isnan(y123).any(axis=1) & ~np.isnan(x).any(axis=1)  # Maschera per righe senza valori NaN
+    y123, x = y123[mask], x[mask]  # Filtra le righe con dati validi
+    nobs -= num_lags + integration  # Aggiorna il numero di osservazioni considerando i lag e l'integrazione
+
+    # Costruisce il modello VAR
+    var_model = VAR(y123)  # Crea il modello VAR con i dati delle serie temporali
+    lag_order = num_lags + integration  # Imposta il numero totale di lag
+    # Costruisce la matrice esogena con costante e/o trend se specificati
+    exog = np.hstack((np.ones((len(x), 1)), x)) if constant else x
+    trend_term = np.arange(1, len(y123) + 1).reshape(-1, 1) if trend else None
+    exog = np.hstack((exog, trend_term)) if trend_term is not None else exog
+
+    # Adatta il modello VAR
+    var_result = var_model.fit(lag_order, trend='c' if constant else 'n', exog=exog)
+    coeff_matrix = var_result.params  # Matrice dei coefficienti stimati
+    residuals = var_result.resid  # Residui del modello
+    sigma_u = var_result.sigma_u  # Matrice di covarianza dei residui
+
+    # Funzione per calcolare le statistiche del test di Granger
+    def test_statistics(var_coeffs, var_cov, df1, df2):
+        """Calcola le statistiche del test di Granger."""
+        stat = var_coeffs.T @ np.linalg.inv(var_cov) @ var_coeffs  # Statistica del test
+        if test_type == 'chi-square':  # Test chi-quadrato
+            cval = chi2.ppf(1 - alpha, df1)  # Valore critico per chi-quadrato
+            pval = 1 - chi2.cdf(stat, df1)  # p-value per chi-quadrato
+        else:  # Test F
+            stat /= df1
+            cval = f.ppf(1 - alpha, df1, df2)  # Valore critico per F
+            pval = 1 - f.cdf(stat, df1, df2)  # p-value per F
+        return stat, cval, pval
+
+    # Indici per le variabili di causa ed effetto
+    n_y1, n_y2, n_y3 = y1.shape[1], y2.shape[1], y3.shape[1]
+    cause_indices = np.arange(n_y1)  # Indici per variabili di causa
+    effect_indices = np.arange(n_y1, n_y1 + n_y2)  # Indici per variabili di effetto
+
+    # Estrai sottocampionamenti per test delle ipotesi
+    restricted_cov = var_result.cov_params().iloc[cause_indices, cause_indices]  # Covarianza delle restrizioni
+    unrestricted_coeffs = coeff_matrix.iloc[effect_indices, cause_indices].values.flatten()  # Coefficienti stimati
+
+    # Gradi di libertà
+    df1 = unrestricted_coeffs.size  # Gradi di libertà del numeratore
+    df2 = nobs - coeff_matrix.shape[0]  # Gradi di libertà del denominatore
+
+    # Calcola statistiche, valori critici e p-value
+    stat, cval, pval = test_statistics(unrestricted_coeffs, restricted_cov, df1, df2)
+
+    # Prepara i risultati
+    results = {
+        'test_statistic': stat,  # Statistica del test
+        'critical_value': cval,  # Valore critico
+        'p_value': pval,  # P-value
+        'hypothesis': pval <= alpha  # Risultato del test
+    }
+
+    # Se i dati sono tabulari, restituisci un DataFrame
+    if isinstance(data, pd.DataFrame):
+        return pd.DataFrame([results], index=["Granger Test"])
+
+    return results
+
+#def granger_causality_test(y, x, max_lag):
 #    """
-#    Perform a Chow test for a structural break at a specified breakpoint or breakpoint range.
-#    
+#    Implementazione manuale del test di causalità di Granger.
+#
 #    Argomenti:
-#        X: Le variabili indipendenti/explanatory.
-#        Y: La variabile dipendente.
-#        last_index (int): L'indice dell'ultimo punto prima del breakpoint.
-#        first_index (int, opzionale): L'indice del primo punto dopo il breakpoint (per intervalli). Predefinito è None.
-#        significance (float, opzionale): Il livello di significatività per il test (predefinito: 0.05).
-#        
-#    Restituisce:
-#        f_stat (float): F statistic.
-#        p_value (float): Il p-value per Chow test.
+#        y (np.ndarray): Variabile dipendente (serie target).
+#        x (np.ndarray): Variabile indipendente (serie predittore).
+#        max_lag (int): Numero massimo di ritardi da includere.
+#
+#    Risultato:
+#        dict: Contiene F-statistic, p-value e conclusione del test.
 #    """
-#    # Aggiungo la costante per la regression
-#    X = sm.add_constant(X)
+#    # Se x è un array numpy, convertilo in una Serie Pandas
+#    if isinstance(x, np.ndarray):
+#        x = pd.Series(x)
+#    # Se y è un array numpy, convertilo in una Serie Pandas
+#    if isinstance(y, np.ndarray):
+#        y = pd.Series(y)
 #
-#    # Split dei dati in base all'indice di divisione dei due periodi
-#    if first_index is None:
-#        first_index = last_index + 1 
+#    # Controllo della lunghezza delle serie
+#    if len(x) != len(y):
+#        raise ValueError("Input time series must have the same lenght.")
+#    # Verifica che il numero massimo di lag sia compatibile con la lunghezza della serie
+#    if max_lag >= len(y):
+#        raise ValueError("max_lag must be less than the lenght of input time series.")
 #
-#    # Split 
-#    X1, X2 = X[:last_index], X[first_index:]
-#    Y1, Y2 = Y[:last_index], Y[first_index:]
+#    # Funzione per creare una matrice di ritardi per una serie temporale
+#    def create_lagged_matrix(series, lags):
+#        # Costruisce una matrice con colonne che rappresentano ritardi successivi della serie
+#        return np.column_stack([series.shift(i).to_numpy() for i in range(1, lags + 1)])[lags:]
 #
-#    # Fitto due regressioni per i due periodi
-#    model1 = sm.OLS(Y1, X1).fit()
-#    model2 = sm.OLS(Y2, X2).fit()
+#    # Creazione delle matrici di ritardi per Y e X
+#    lagged_y = create_lagged_matrix(y, max_lag)  # Matrice dei ritardi per Y
+#    lagged_x = create_lagged_matrix(x, max_lag)  # Matrice dei ritardi per X
+#    trimmed_y = y[max_lag:].to_numpy()  # Allinea Y con le matrici di ritardo
 #
-#    # Fitto il modello completo
-#    model_full = sm.OLS(Y, X).fit()
+#    # Modello ristretto: regressione di Y sui propri ritardi
+#    restricted_model_data = sm.add_constant(lagged_y)  # Aggiunge una costante per la regressione
+#    restricted_model = sm.OLS(trimmed_y, restricted_model_data).fit()  # Esegue la regressione
+#    ssr_restricted = restricted_model.ssr  # Somma dei residui quadrati (modello ristretto)
 #
-#    # Compute the residual sum of squares (SSR) for each model
-#    SSR_full = model_full.ssr  # Full model
-#    SSR1 = model1.ssr  # First segment
-#    SSR2 = model2.ssr  # Second segment
+#    # Modello non ristretto: regressione di Y sui ritardi di Y e X
+#    unrestricted_model_data = sm.add_constant(np.hstack([lagged_y, lagged_x]))  # Aggiunge X ai predittori
+#    unrestricted_model = sm.OLS(trimmed_y, unrestricted_model_data).fit()  # Esegue la regressione
+#    ssr_unrestricted = unrestricted_model.ssr  # Somma dei residui quadrati (modello non ristretto)
 #
-#    # Calculate the number of parameters (including constant)
-#    k = X.shape[1]
+#    # Calcolo della statistica F per il test di causalità di Granger
+#    n_lags = max_lag  # Gradi di libertà per il numeratore
+#    df_resid = len(trimmed_y) - unrestricted_model_data.shape[1]  # Gradi di libertà per il denominatore
+#    f_stat = ((ssr_restricted - ssr_unrestricted) / n_lags) / (ssr_unrestricted / df_resid)  # Formula della statistica F
 #
-#    # Sample sizes for each segment
-#    n1, n2 = len(Y1), len(Y2)
+#    # Calcolo del p-value utilizzando la distribuzione F
+#    p_value = 1 - f.cdf(f_stat, n_lags, df_resid)  # Calcola il p-value dalla cdf della distribuzione F
 #
-#    # Compute the F-statistic
-#    numerator = (SSR_full - (SSR1 + SSR2)) / k
-#    denominator = (SSR1 + SSR2) / (n1 + n2 - 2 * k)
-#    f_stat = numerator / denominator
+#    # Step 4: Conclusion
+#    conclusion = "X Granger-causes Y" if p_value < 0.05 else "No Granger causality from X to Y"
 #
-#    # Calculate the p-value using the F-distribution
-#    p_value = 1 - f.cdf(f_stat, dfn=k, dfd=n1 + n2 - 2 * k)
+#    # Print Results
+#    print("\nGranger Causality Test Results")
+#    print(f"Restricted SSR: {ssr_restricted:.4f}")
+#    print(f"Unrestricted SSR: {ssr_unrestricted:.4f}")
+#    print(f"F-statistic: {f_stat:.4f}")
+#    print(f"P-value: {p_value:.4f}")
+#    print(f"Conclusion: {conclusion}")
 #
-#    # Interpret the results based on the significance level
-#    if p_value < significance:
-#        print(f"Structural break detected at the breakpoint (p-value = {p_value:.4f})")
-#    else:
-#        print(f"No structural break detected at the breakpoint (p-value = {p_value:.4f})")
-#
-#    return f_stat, p_value
+#    # Return results as a dictionary
+#    return {
+#        "f_stat": f_stat,
+#        "p_value": p_value,
+#        "ssr_restricted": ssr_restricted,
+#        "ssr_unrestricted": ssr_unrestricted,
+#        "conclusion": conclusion,
+#    }
