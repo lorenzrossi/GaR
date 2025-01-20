@@ -1,27 +1,23 @@
 import pandas as pd
 import numpy as np
 import os
-import statsmodels.api as sm
 #import scipy
 import matplotlib.pyplot as plt
-import seaborn as sns
-import matplotlib.dates as mdates
-import matplotlib as mpl
-from scipy import stats
 from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.stats.diagnostic import acorr_ljungbox
-from statsmodels.tsa.vector_ar.vecm import coint_johansen
-from statsmodels.tsa.stattools import coint
 from scipy.stats import f, chi2
 import warnings
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.tsatools import lagmat
-from scipy.linalg import eig, inv
+from scipy.linalg import inv
 from statsmodels.tsa.stattools import adfuller
 from numpy.polynomial.polynomial import Polynomial
-from tabulate import tabulate
-from scipy.interpolate import interp1d
 from statsmodels.tsa.api import VAR
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tsa.coint_tables import c_sja, c_sjt
+from scipy.interpolate import interp1d
+import statsmodels.api as sm
+
 
 
 
@@ -274,7 +270,7 @@ def analyze_order(order, results_dict):
 
         # Plot Residuals
         plt.figure(figsize=(25, 8))
-        plt.plot(residuals, label="Residuals", color="blue")
+        plt.plot(residuals[1:], label="Residuals", color="blue")
         plt.axhline(0, color='red', linestyle='--', linewidth=1)
         plt.title(f"Residuals for ARIMA order {order}")
         plt.xlabel("Time")
@@ -285,14 +281,14 @@ def analyze_order(order, results_dict):
 
         # Plot Autocorrelation of Residuals
         plt.figure(figsize=(25, 6))
-        plot_acf(residuals, lags=24)
+        plot_acf(residuals[1:], lags=24)
         plt.title(f"Autocorrelation of Residuals for ARIMA order {order}")
         plt.show()
 
         # Plot Fitted Values Against True Values
         plt.figure(figsize=(25, 8))
         plt.plot(model_fit.data.endog, label="True Values", color="blue", alpha=0.6)
-        plt.plot(fitted_values, label="Fitted Values", color="orange", alpha=0.8)
+        plt.plot(fitted_values[1:], label="Fitted Values", color="orange", alpha=0.8)
         plt.title(f"Fitted vs True Values for ARIMA order {order}")
         plt.xlabel("Time")
         plt.ylabel("Values")
@@ -367,122 +363,119 @@ def ljung_box_test(order, results_dict, lags=24):
         return None
     
 
-def jcitest(data, model='H1', lags=0, test='trace', alpha=0.05, display='summary', data_variables=None):
-    """
-    Esegue il test di cointegrazione di Johansen.
+def jcitest(endog,  det_order, k_ar_diff):
+    if det_order not in [-1, 0, 1]:
+        warnings.warn(
+            "Critical values are only available for a det_order of -1, 0, or 1.",
+            stacklevel=2,
+        )
+    if endog.shape[1] > 12:
+        warnings.warn(
+            "Critical values are only available for time series with 12 variables at most.",
+            stacklevel=2,
+        )
+
+    def compute_p_value(stat, crit_vals):
+        """
+        Compute approximate p-value for Johansen test statistic using interpolation.
+
+        Parameters
+        ----------
+        stat : float
+            The test statistic value (trace or max eigenvalue).
+        crit_vals : array-like
+            Critical values for the test at different significance levels (90%, 95%, 99%).
+
+        Returns
+        -------
+        float
+            Approximate p-value.
+        """
+        significance_levels = np.array([0.10, 0.05, 0.01])  # Corresponding significance levels
+
+        if stat < crit_vals[0]:
+            return 1.0  # Very high p-value (no evidence of cointegration)
+        elif stat > crit_vals[-1]:
+            return 0.01  # Very low p-value (strong evidence of cointegration)
+        else:
+            return np.interp(stat, crit_vals, significance_levels[::-1])
+
+    def detrend(y, order):
+        if order == -1:
+            return y
+        return OLS(y, np.vander(np.linspace(-1, 1, len(y)), order + 1)).fit().resid
+
+    def resid(y, x):
+        if x.size == 0:
+            return y
+        return y - np.dot(x, np.dot(np.linalg.pinv(x), y))
+
+    endog = np.asarray(endog)
+    nobs, neqs = endog.shape
+    f = 0 if det_order > -1 else det_order
+
+    endog = detrend(endog, det_order)
+    dx = np.diff(endog, 1, axis=0)
+    z = lagmat(dx, k_ar_diff)
+    z = z[k_ar_diff:]
+    z = detrend(z, f)
+    dx = dx[k_ar_diff:]
+    dx = detrend(dx, f)
+    r0t = resid(dx, z)
+    lx = endog[: (endog.shape[0] - k_ar_diff)][1:]
+    dx = detrend(lx, f)
+    rkt = resid(dx, z)
+    skk = np.dot(rkt.T, rkt) / rkt.shape[0]
+    sk0 = np.dot(rkt.T, r0t) / rkt.shape[0]
+    s00 = np.dot(r0t.T, r0t) / r0t.shape[0]
+    sig = np.dot(sk0, np.dot(inv(s00), sk0.T))
+    tmp = inv(skk)
+    au, du = np.linalg.eig(np.dot(tmp, sig))
+    temp = inv(np.linalg.cholesky(np.dot(du.T, np.dot(skk, du))))
+    dt = np.dot(du, temp)
+    auind = np.argsort(au)
+    aind = np.flipud(auind)
+    a = au[aind]
+    d = dt[:, aind]
+    non_zero_d = d.flat != 0
+    if np.any(non_zero_d):
+        d *= np.sign(d.flat[non_zero_d][0])
+
+    lr1 = np.zeros(neqs)
+    lr2 = np.zeros(neqs)
+    cvm = np.zeros((neqs, 3))
+    cvt = np.zeros((neqs, 3))
+    p_values_trace = np.zeros(neqs)
+    p_values_max_eig = np.zeros(neqs)
+    iota = np.ones(neqs)
+    t = rkt.shape[0]
+
+    for i in range(neqs):
+        lr1[i] = -t * np.sum(np.log(iota - a)[i:])
+        lr2[i] = -t * np.log(1 - a[i])
+
+        cvm[i, :] = c_sja(neqs - i, det_order)
+        cvt[i, :] = c_sjt(neqs - i, det_order)
+        aind[i] = i
+
+        # Compute p-values
+        p_values_trace[i] = compute_p_value(lr1[i], cvt[i, :])
+        p_values_max_eig[i] = compute_p_value(lr2[i], cvm[i, :])
+
     
-    Parametri:
-    - data: array numpy, DataFrame pandas o Series pandas contenente i dati temporali
-    - model: stringa, tipo di modello VECM ('H2', 'H1*', 'H1', 'H*', 'H')
-    - lags: intero, numero di ritardi
-    - test: stringa, tipo di test ('trace', 'maxeig')
-    - alpha: float, livello di significatività
-    - display: stringa, livello di dettaglio dell'output ('off', 'summary', 'params', 'full')
-    - data_variables: lista, nomi delle colonne da selezionare in un DataFrame
-    
-    Restituisce:
-    - results: dizionario con risultati del test (statistiche, p-value, valori critici, autovalori, ecc.)
-    """
-
-    # Verifica che i dati siano in un formato valido
-    if not isinstance(data, (np.ndarray, pd.DataFrame, pd.Series)):
-        raise ValueError("I dati devono essere un array numpy, DataFrame pandas o Series pandas.")
-    
-    # Se i dati sono un DataFrame e sono specificate colonne, seleziona quelle
-    if isinstance(data, pd.DataFrame) and data_variables:
-        data = data[data_variables].to_numpy()
-    elif isinstance(data, (pd.DataFrame, pd.Series)):
-        data = data.to_numpy()
-    
-    # Converte i dati in array numpy (se non lo sono già)
-    data = np.asarray(data, dtype=float)
-    
-    # Verifica che i dati abbiano almeno due colonne
-    if data.ndim != 2 or data.shape[1] < 2:
-        raise ValueError("I dati devono essere una matrice 2D con almeno due colonne.")
-    
-    # Rimuove righe con valori mancanti
-    data = data[~np.isnan(data).any(axis=1)]
-    num_obs, num_dims = data.shape  # Ottieni il numero di osservazioni e di dimensioni
-
-    # Verifica che il numero di ritardi e alpha siano validi
-    if not isinstance(lags, int) or lags < 0:
-        raise ValueError("I ritardi devono essere un intero non negativo.")
-    if not 0 < alpha < 1:
-        raise ValueError("Alpha deve essere compreso tra 0 e 1.")
-
-    # Simula i livelli di significatività e i valori critici (placeholder)
-    sig_levels = np.linspace(0.001, 0.999, 100)  # Livelli di significatività predefiniti
-    max_dims = 12  # Numero massimo di dimensioni per i valori critici
-    critical_values = np.random.rand(max_dims, len(sig_levels))  # Placeholder per valori critici reali
-
-    # Se il numero di dimensioni supera il massimo tabulato, solleva un errore
-    if num_dims > max_dims:
-        raise ValueError(f"Il numero di dimensioni ({num_dims}) supera i valori critici tabulati ({max_dims}).")
-    
-    # Funzione per creare una matrice con ritardi
-    def lag_matrix(X, lag):
-        """Crea una matrice di ritardi per un dato lag."""
-        return np.hstack([np.roll(X, -i, axis=0) for i in range(lag + 1)])[lag:]
-
-    # Crea la matrice con i ritardi
-    Y_lags = lag_matrix(data, lags + 1)
-    DY = Y_lags[:, :num_dims] - Y_lags[:, num_dims:2*num_dims]  # Differenze
-    LY = Y_lags[:, num_dims:2*num_dims]  # Valori ritardati
-    DLY = Y_lags[:, 2*num_dims:]  # Ritardi multipli delle differenze
-
-    # Configura i modelli basati sui parametri specificati
-    if model == 'H2':
-        Z0, Z1, Z2 = DY, LY, DLY
-    elif model == 'H1*':
-        Z0, Z1, Z2 = DY, np.hstack([LY, np.ones((LY.shape[0], 1))]), DLY
-    elif model == 'H1':
-        Z0, Z1, Z2 = DY, LY, np.hstack([DLY, np.ones((DLY.shape[0], 1))])
-    elif model == 'H*':
-        Z0, Z1, Z2 = DY, np.hstack([LY, np.arange(1, LY.shape[0] + 1).reshape(-1, 1)]), np.hstack([DLY, np.ones((DLY.shape[0], 1))])
-    elif model == 'H':
-        Z0, Z1, Z2 = DY, LY, np.hstack([DLY, np.ones((DLY.shape[0], 1)), np.arange(1, DLY.shape[0] + 1).reshape(-1, 1)])
-    else:
-        raise ValueError(f"Modello '{model}' non supportato.")
-
-    # Calcolo dei residui
-    R0 = Z0 - Z2 @ np.linalg.lstsq(Z2, Z0, rcond=None)[0]
-    R1 = Z1 - Z2 @ np.linalg.lstsq(Z2, Z1, rcond=None)[0]
-    S00 = R0.T @ R0 / num_obs  # Matrice delle covarianze
-    S01 = R0.T @ R1 / num_obs
-    S11 = R1.T @ R1 / num_obs
-
-    # Decomposizione agli autovalori
-    eigvals, eigvecs = eig(S01 @ np.linalg.inv(S00) @ S01.T, S11)
-    eigvals = np.sort(np.real(eigvals))[::-1]  # Ordina gli autovalori in ordine decrescente
-    eigvecs = eigvecs[:, np.argsort(np.real(eigvals))[::-1]]  # Riorganizza gli autovettori
-
-    # Calcolo delle statistiche del test
-    log_lambda = np.log(1 - eigvals)  # Logaritmo di (1 - autovalore)
-    test_stats = -num_obs * np.cumsum(log_lambda[::-1])[::-1] if test == 'trace' else -num_obs * log_lambda
-
-    # Calcolo dei p-value tramite interpolazione
-    p_values = [interp1d(critical_values[d, :], sig_levels, kind='linear', bounds_error=False, fill_value="extrapolate")(test_stats[d]) for d in range(num_dims)]
-
-    # Crea il dizionario dei risultati
-    results = {
-        'test_stats': test_stats,
-        'p_values': p_values,
-        'critical_values': critical_values[:, int(alpha * len(sig_levels))],
-        'eigvals': eigvals,
-        'model': model,
-        'lags': lags
+    # Display all values of the result
+    result_dict = {
+        "Eigenvalues": a,
+        "Eigenvectors": d,
+        "Trace Test Statistics": lr1,
+        "Max Eigenvalue Statistics": lr2,
+        "Critical Values (Trace)": cvt,
+        "Critical Values (Max Eigenvalue)": cvm,
+        "P-values (Trace)": p_values_trace,
+        "P-values (Max Eigenvalue)": p_values_max_eig,
     }
 
-    # Mostra i risultati se richiesto
-    if display in ['summary', 'full']:
-        print(f"\nRisultati del Test di Cointegrazione di Johansen (Modello: {model}, Ritardi: {lags}, Alpha: {alpha})")
-        print("=============================================")
-        print(f"{'Rank':<5}{'Stat':<10}{'Crit Val':<10}{'P-Value':<10}")
-        for r, stat in enumerate(test_stats):
-            print(f"{r:<5}{stat:<10.4f}{results['critical_values'][r]:<10.4f}{p_values[r]:<10.4f}")
-
-    return results
+    return result_dict
 
 
 #def compute_critical_values(rank, alpha, det_order):
@@ -706,164 +699,165 @@ def jcitest(data, model='H1', lags=0, test='trace', alpha=0.05, display='summary
 #        print(f"{'=' * 60}\n")
 
 
-def egcitest(data, creg='c', rreg='ADF', lags=0, test='t1', alpha=0.05,
-             response_variable=None, predictor_variables=None):
-    """
-    Test di cointegrazione Engle-Granger.
-    
-    Parametri:
-    - data: numpy.ndarray, pandas.DataFrame o pandas.Series (i dati di input)
-    - creg: str, tipo di regressione ('nc', 'c', 'ct', 'ctt')
-    - cvec: list o numpy.ndarray, coefficienti specificati dall'utente
-    - rreg: str, metodo per la regressione residua ('ADF' o 'PP')
-    - lags: int, numero di lag per il test residuo
-    - test: str, tipo di test ('t1', 't2')
-    - alpha: float, livello di significatività
-    - response_variable: str, variabile di risposta (se data è un DataFrame)
-    - predictor_variables: list, variabili predittive (se data è un DataFrame)
-    
-    Ritorna:
-    - results: dict, contiene statistiche del test, p-value e valori critici
-    """
-
-    # Converti i dati in array numpy se sono un DataFrame o una Series
-    if isinstance(data, pd.DataFrame):
-        if response_variable:  # Se è specificata una variabile di risposta
-            y = data[response_variable].values  # Estrai la variabile di risposta
-        else:
-            y = data.iloc[:, 0].values  # Per default usa la prima colonna come risposta
-        if predictor_variables:  # Se sono specificate variabili predittive
-            x = data[predictor_variables].values  # Estrai le variabili predittive
-        else:
-            x = data.drop(columns=[data.columns[0]]).values  # Usa tutte le altre colonne
-    elif isinstance(data, (np.ndarray, pd.Series)):  # Se i dati sono un array numpy o una Series
-        y = data[:, 0] if data.ndim > 1 else data  # La prima colonna è la variabile di risposta
-        x = data[:, 1:] if data.ndim > 1 else None  # Le altre colonne sono predittori
-    else:
-        raise ValueError("I dati devono essere un array numpy, un DataFrame pandas o una Series.")
-
-    # Controlla che ci siano abbastanza predittori
-    if x is None or x.shape[1] < 1:
-        raise ValueError("I dati devono avere almeno una variabile predittiva.")
-    # Verifica che i lag siano validi
-    if not isinstance(lags, int) or lags < 0:
-        raise ValueError("Il numero di lag deve essere un intero non negativo.")
-    # Controlla che il tipo di regressione sia valido
-    if creg not in ['nc', 'c', 'ct', 'ctt']:
-        raise ValueError("Valore di 'creg' non valido. Usa ['nc', 'c', 'ct', 'ctt'].")
-    # Controlla che il metodo di regressione residua sia valido
-    if rreg not in ['ADF', 'PP']:
-        raise ValueError("Valore di 'rreg' non valido. Usa ['ADF', 'PP'].")
-    # Controlla che il tipo di test sia valido
-    if test not in ['t1', 't2']:
-        raise ValueError("Valore di 'test' non valido. Usa ['t1', 't2'].")
-    # Controlla che alpha sia compreso tra 0 e 1
-    if not (0 < alpha < 1):
-        raise ValueError("Alpha deve essere compreso tra 0 e 1.")
-
-    # Step 1: Esegui la regressione di cointegrazione
-    if creg == 'nc':  # Nessuna costante
-        x_design = x
-    elif creg == 'c':  # Solo costante
-        x_design = np.hstack((np.ones((x.shape[0], 1)), x))  # Aggiungi una colonna di 1
-    elif creg == 'ct':  # Costante e trend
-        trend = np.arange(1, x.shape[0] + 1).reshape(-1, 1)  # Crea una colonna con i numeri da 1 a n
-        x_design = np.hstack((np.ones((x.shape[0], 1)), trend, x))  # Aggiungi trend e costante
-    elif creg == 'ctt':  # Costante, trend e trend quadratico
-        trend = np.arange(1, x.shape[0] + 1).reshape(-1, 1)  # Crea una colonna di trend
-        trend2 = trend ** 2  # Crea una colonna di trend quadratico
-        x_design = np.hstack((np.ones((x.shape[0], 1)), trend, trend2, x))  # Aggiungi tutto
-
-    # Esegui la regressione OLS
-    coeffs = np.linalg.lstsq(x_design, y, rcond=None)[0]  # Calcola i coefficienti con OLS
-    residuals = y - x_design @ coeffs  # Calcola i residui della regressione
-
-    # Step 2: Esegui il test di radice unitaria sui residui
-    if rreg == 'ADF':  # Usa il test ADF
-        adf_result = adfuller(residuals, maxlag=lags, regression='c' if test == 't1' else 'ct')
-        test_statistic, p_value, critical_values = adf_result[0], adf_result[1], adf_result[4]
-    elif rreg == 'PP':  # Placeholder per il test PP (non implementato)
-        raise NotImplementedError("Il test PP non è ancora implementato.")
-
-    # Interpola i valori critici se necessario (non implementato in questo esempio)
-
-    # Step 3: Prepara i risultati
-    results = {
-        'test_statistic': test_statistic,  # Statistica del test
-        'p_value': p_value,  # P-value del test
-        'critical_values': critical_values,  # Valori critici
-        'coefficients': coeffs,  # Coefficienti della regressione
-        'residuals': residuals  # Residui della regressione
-    }
-
-    # Stampa i risultati
-    print("\nEngle-Granger Cointegration Test Results")
-    print(f"Statistic: {test_statistic:.4f}")
-    print(f"P-Value: {p_value:.4f}")
-    print("Critical Values:")
-    for key, value in critical_values.items():
-        print(f"  {key}: {value:.4f}")
-
-    return results
-#def egcitest(Y, X, max_lags=0):
+#def egcitest(data, creg='c', rreg='ADF', lags=0, test='t1', alpha=0.05,
+#             response_variable=None, predictor_variables=None):
 #    """
-#    Implementazione manuale del test di Engle-Granger per la cointegrazione.
-#
-#    Argomenti:
-#        Y (array-like): Serie temporale dipendente.
-#        X (array-like): Serie temporale indipendente.
-#        max_lags (int): max_lags (int): Numero massimo di lag inclusi nel ADF test (default = 0).
-#
-#    Restituisce:
-#        dict: Risultati del test con statistiche, p-value e conclusione.
+#    Test di cointegrazione Engle-Granger.
+#    
+#    Parametri:
+#    - data: numpy.ndarray, pandas.DataFrame o pandas.Series (i dati di input)
+#    - creg: str, tipo di regressione ('nc', 'c', 'ct', 'ctt')
+#    - cvec: list o numpy.ndarray, coefficienti specificati dall'utente
+#    - rreg: str, metodo per la regressione residua ('ADF' o 'PP')
+#    - lags: int, numero di lag per il test residuo
+#    - test: str, tipo di test ('t1', 't2')
+#    - alpha: float, livello di significatività
+#    - response_variable: str, variabile di risposta (se data è un DataFrame)
+#    - predictor_variables: list, variabili predittive (se data è un DataFrame)
+#    
+#    Ritorna:
+#    - results: dict, contiene statistiche del test, p-value e valori critici
 #    """
 #
-#    if not isinstance(X, (pd.Series, pd.DataFrame)):
-#        X = pd.Series(X)
-#    if not isinstance(Y, (pd.Series, pd.DataFrame)):
-#        Y = pd.Series(Y)
+#    # Converti i dati in array numpy se sono un DataFrame o una Series
+#    if isinstance(data, pd.DataFrame):
+#        if response_variable:  # Se è specificata una variabile di risposta
+#            y = data[response_variable].values  # Estrai la variabile di risposta
+#        else:
+#            y = data.iloc[:, 0].values  # Per default usa la prima colonna come risposta
+#        if predictor_variables:  # Se sono specificate variabili predittive
+#            x = data[predictor_variables].values  # Estrai le variabili predittive
+#        else:
+#            x = data.drop(columns=[data.columns[0]]).values  # Usa tutte le altre colonne
+#    elif isinstance(data, (np.ndarray, pd.Series)):  # Se i dati sono un array numpy o una Series
+#        y = data[:, 0] if data.ndim > 1 else data  # La prima colonna è la variabile di risposta
+#        x = data[:, 1:] if data.ndim > 1 else None  # Le altre colonne sono predittori
+#    else:
+#        raise ValueError("I dati devono essere un array numpy, un DataFrame pandas o una Series.")
 #
-#    # Regressione OLS di Y su X
-#    #if "const" not in X.columns: # Controllo se X ha già una colonna di costante; in caso contrario, la aggiungo.
-#    X = sm.add_constant(X)  # Aggiunge un termine costante al modello
-#    model = sm.OLS(Y, X).fit()  # Esegue la regressione OLS
-#    residuals = model.resid  # Estrae i residui dal modello
+#    # Controlla che ci siano abbastanza predittori
+#    if x is None or x.shape[1] < 1:
+#        raise ValueError("I dati devono avere almeno una variabile predittiva.")
+#    # Verifica che i lag siano validi
+#    if not isinstance(lags, int) or lags < 0:
+#        raise ValueError("Il numero di lag deve essere un intero non negativo.")
+#    # Controlla che il tipo di regressione sia valido
+#    if creg not in ['nc', 'c', 'ct', 'ctt']:
+#        raise ValueError("Valore di 'creg' non valido. Usa ['nc', 'c', 'ct', 'ctt'].")
+#    # Controlla che il metodo di regressione residua sia valido
+#    if rreg not in ['ADF', 'PP']:
+#        raise ValueError("Valore di 'rreg' non valido. Usa ['ADF', 'PP'].")
+#    # Controlla che il tipo di test sia valido
+#    if test not in ['t1', 't2']:
+#        raise ValueError("Valore di 'test' non valido. Usa ['t1', 't2'].")
+#    # Controlla che alpha sia compreso tra 0 e 1
+#    if not (0 < alpha < 1):
+#        raise ValueError("Alpha deve essere compreso tra 0 e 1.")
 #
-#    # Test ADF sui residui per valutare la stazionarietà
-#    adf_result = adfuller(residuals, maxlag=max_lags, autolag=None if max_lags > 0 else "AIC")
-#    adf_statistic = adf_result[0]  # Statistica del test ADF
-#    p_value = adf_result[1]  # p-value del test ADF
-#    critical_values = adf_result[4]  # Valori critici del test ADF
+#    # Step 1: Esegui la regressione di cointegrazione
+#    if creg == 'nc':  # Nessuna costante
+#        x_design = x
+#    elif creg == 'c':  # Solo costante
+#        x_design = np.hstack((np.ones((x.shape[0], 1)), x))  # Aggiungi una colonna di 1
+#    elif creg == 'ct':  # Costante e trend
+#        trend = np.arange(1, x.shape[0] + 1).reshape(-1, 1)  # Crea una colonna con i numeri da 1 a n
+#        x_design = np.hstack((np.ones((x.shape[0], 1)), trend, x))  # Aggiungi trend e costante
+#    elif creg == 'ctt':  # Costante, trend e trend quadratico
+#        trend = np.arange(1, x.shape[0] + 1).reshape(-1, 1)  # Crea una colonna di trend
+#        trend2 = trend ** 2  # Crea una colonna di trend quadratico
+#        x_design = np.hstack((np.ones((x.shape[0], 1)), trend, trend2, x))  # Aggiungi tutto
 #
-#    # Calcolo dell'errore standard residuo
-#    # L'errore standard residuo tiene conto dei gradi di libertà
-#    residual_std_error = np.sqrt(np.sum(residuals**2) / (len(residuals) - len(model.params)))
+#    # Esegui la regressione OLS
+#    coeffs = np.linalg.lstsq(x_design, y, rcond=None)[0]  # Calcola i coefficienti con OLS
+#    residuals = y - x_design @ coeffs  # Calcola i residui della regressione
 #
-#    # Conclusione sulla cointegrazione
-#    conclusion = "Cointegrated" if p_value < 0.05 else "Not Cointegrated"
+#    # Step 2: Esegui il test di radice unitaria sui residui
+#    if rreg == 'ADF':  # Usa il test ADF
+#        adf_result = adfuller(residuals, maxlag=lags, regression='c' if test == 't1' else 'ct')
+#        test_statistic, p_value, critical_values = adf_result[0], adf_result[1], adf_result[4]
+#    elif rreg == 'PP':  # Placeholder per il test PP (non implementato)
+#        raise NotImplementedError("Il test PP non è ancora implementato.")
 #
-#    # Stampiamo i risultati del test
-#    print("\nEngle-Granger Test Results")
-#    print("OLS Results:")
-#    print(f"  Coefficients: {model.params}")  # Coefficienti stimati dal modello
-#    print(f"  Residual SE: {residual_std_error:.4f}")  # Errore standard residuo
-#    print("\nADF Test on the Residuals:")
-#    print(f"  Stat: {adf_statistic:.4f}")  # Statistica del test ADF
-#    print(f"  P-value: {p_value:.4f}")  # p-value del test
-#    print("  Critical Values:")
-#    for key, value in critical_values.items():
-#        print(f"    {key}: {value:.4f}")  # Stampiamo i valori critici formattati
-#    print(f"Conclusion: {conclusion}")  # Stampiamo la conclusione
+#    # Interpola i valori critici se necessario (non implementato in questo esempio)
 #
-#    # Restituiamo i risultati come dizionario
-#    return {
-#        "coefficients": model.params,  # Coefficienti del modello OLS
-#        "residuals": residuals,  # Residui del modello
-#        "adf_statistic": adf_statistic,  # Statistica del test ADF
-#        "p_value": p_value,  # p-value del test ADF
-#        "critical_values": critical_values,  # Valori critici del test ADF
-#        "conclusion": conclusion,  # Conclusione sulla cointegrazione
+#    # Step 3: Prepara i risultati
+#    results = {
+#        'test_statistic': test_statistic,  # Statistica del test
+#        'p_value': p_value,  # P-value del test
+#        'critical_values': critical_values,  # Valori critici
+#        'coefficients': coeffs,  # Coefficienti della regressione
+#        'residuals': residuals  # Residui della regressione
 #    }
+#
+#    # Stampa i risultati
+#    print("\nEngle-Granger Cointegration Test Results")
+#    print(f"Statistic: {test_statistic:.4f}")
+#    print(f"P-Value: {p_value:.4f}")
+#    print("Critical Values:")
+#    for key, value in critical_values.items():
+#        print(f"  {key}: {value:.4f}")
+#
+#    return results
+
+def egcitest(Y, X, max_lags=0):
+    """
+    Implementazione manuale del test di Engle-Granger per la cointegrazione.
+
+    Argomenti:
+        Y (array-like): Serie temporale dipendente.
+        X (array-like): Serie temporale indipendente.
+        max_lags (int): max_lags (int): Numero massimo di lag inclusi nel ADF test (default = 0).
+
+    Restituisce:
+        dict: Risultati del test con statistiche, p-value e conclusione.
+    """
+
+    if not isinstance(X, (pd.Series, pd.DataFrame)):
+        X = pd.Series(X)
+    if not isinstance(Y, (pd.Series, pd.DataFrame)):
+        Y = pd.Series(Y)
+
+    # Regressione OLS di Y su X
+    #if "const" not in X.columns: # Controllo se X ha già una colonna di costante; in caso contrario, la aggiungo.
+    X = sm.add_constant(X)  # Aggiunge un termine costante al modello
+    model = sm.OLS(Y, X).fit()  # Esegue la regressione OLS
+    residuals = model.resid  # Estrae i residui dal modello
+
+    # Test ADF sui residui per valutare la stazionarietà
+    adf_result = adfuller(residuals, maxlag=max_lags, autolag=None if max_lags > 0 else "AIC")
+    adf_statistic = adf_result[0]  # Statistica del test ADF
+    p_value = adf_result[1]  # p-value del test ADF
+    critical_values = adf_result[4]  # Valori critici del test ADF
+
+    # Calcolo dell'errore standard residuo
+    # L'errore standard residuo tiene conto dei gradi di libertà
+    residual_std_error = np.sqrt(np.sum(residuals**2) / (len(residuals) - len(model.params)))
+
+    # Conclusione sulla cointegrazione
+    conclusion = "Cointegrated" if p_value < 0.05 else "Not Cointegrated"
+
+    # Stampiamo i risultati del test
+    print("\nEngle-Granger Test Results")
+    print("OLS Results:")
+    print(f"  Coefficients: {model.params}")  # Coefficienti stimati dal modello
+    print(f"  Residual SE: {residual_std_error:.4f}")  # Errore standard residuo
+    print("\nADF Test on the Residuals:")
+    print(f"  Stat: {adf_statistic:.4f}")  # Statistica del test ADF
+    print(f"  P-value: {p_value:.4f}")  # p-value del test
+    print("  Critical Values:")
+    for key, value in critical_values.items():
+        print(f"    {key}: {value:.4f}")  # Stampiamo i valori critici formattati
+    print(f"Conclusion: {conclusion}")  # Stampiamo la conclusione
+
+    # Restituiamo i risultati come dizionario
+    return {
+        "coefficients": model.params,  # Coefficienti del modello OLS
+        "residuals": residuals,  # Residui del modello
+        "adf_statistic": adf_statistic,  # Statistica del test ADF
+        "p_value": p_value,  # p-value del test ADF
+        "critical_values": critical_values,  # Valori critici del test ADF
+        "conclusion": conclusion,  # Conclusione sulla cointegrazione
+    }
 
 def gctest(data, num_lags=1, integration=0, constant=True, trend=False, x=None, alpha=0.05,
            test_type='chi-square', cause_variables=None, effect_variables=None, condition_variables=None,
@@ -930,7 +924,7 @@ def gctest(data, num_lags=1, integration=0, constant=True, trend=False, x=None, 
     exog = np.hstack((exog, trend_term)) if trend_term is not None else exog
 
     # Adatta il modello VAR
-    var_result = var_model.fit(lag_order, trend='c' if constant else 'n', exog=exog)
+    var_result = var_model.fit(lag_order, trend='c' if constant else 'n')
     coeff_matrix = var_result.params  # Matrice dei coefficienti stimati
     residuals = var_result.resid  # Residui del modello
     sigma_u = var_result.sigma_u  # Matrice di covarianza dei residui
